@@ -57,25 +57,65 @@ def normalize_assistant_output(text: str | None) -> AssistantOutput:
     )
 
 
-def extract_json_candidate(text: str) -> str:
+def extract_json_candidate(text: str, *, prefer_object: bool = False) -> str:
     stripped = text.strip()
-    fenced = re.search(r"```(?:json|JSON)?\s*(.*?)\s*```", stripped, flags=re.DOTALL)
-    if fenced:
-        return fenced.group(1).strip()
-    if stripped.startswith(("{", "[")):
-        return stripped
-    decoder = json.JSONDecoder()
-    candidates: list[str] = []
-    for match in re.finditer(r"[\{\[]", stripped):
-        start = match.start()
+    return extract_last_balanced_json_candidate(stripped, prefer_object=prefer_object) or stripped
+
+
+def extract_last_balanced_json_candidate(text: str, *, prefer_object: bool = False) -> str:
+    candidates: list[tuple[str, str]] = []
+    stack: list[tuple[str, int]] = []
+    closing_to_opening = {"}": "{", "]": "["}
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"' and stack:
+            in_string = True
+            continue
+
+        if char in {"{", "["}:
+            stack.append((char, index))
+            continue
+
+        expected_opening = closing_to_opening.get(char)
+        if not expected_opening:
+            continue
+
+        match_index = -1
+        for stack_index in range(len(stack) - 1, -1, -1):
+            if stack[stack_index][0] == expected_opening:
+                match_index = stack_index
+                break
+        if match_index < 0:
+            stack.clear()
+            continue
+
+        opening_char, start = stack[match_index]
+        del stack[match_index:]
+        candidate = text[start : index + 1].strip()
         try:
-            _, end = decoder.raw_decode(stripped[start:])
+            json.loads(candidate)
         except json.JSONDecodeError:
             continue
-        candidates.append(stripped[start : start + end].strip())
+        candidates.append((candidate, opening_char))
+
+    if prefer_object:
+        for candidate, opening_char in reversed(candidates):
+            if opening_char == "{":
+                return candidate
     if candidates:
-        return candidates[-1]
-    return stripped
+        return candidates[-1][0]
+    return ""
 
 
 def parse_assistant_json(text: str | None) -> dict[str, Any] | None:

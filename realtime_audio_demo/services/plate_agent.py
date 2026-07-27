@@ -5,13 +5,31 @@ import logging
 import re
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from realtime_audio_demo.config import QWEN_MODEL
 from realtime_audio_demo.services.interfaces import ChatModel
 from realtime_audio_demo.services.output_filter import extract_json_candidate
+from realtime_audio_demo.services.plate_agent_ack import ack_schedule_for_state
+from realtime_audio_demo.services.plate_agent_edit import (
+    apply_plate_edit_command,
+    normalize_spoken_plate_chars,
+    parse_plate_edit_command,
+    parse_positive_int,
+)
+from realtime_audio_demo.services.plate_agent_prompts import (
+    build_plate_edit_command_prompt,
+    build_plate_update_review_prompt,
+)
+from realtime_audio_demo.services.plate_agent_types import (
+    PlateAgentResult,
+    PlateAgentState,
+    PlateCharState,
+    PlateConfusion,
+    PlateEditResult,
+    PlateUpdateReview,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -20,8 +38,6 @@ CURRENT_TURN_BEFORE_STATE: ContextVar[dict[str, Any] | None] = ContextVar("plate
 
 NO_PLATE_REPLY = "我没有听到车牌号内容，请告诉我车牌号。"
 INVALID_PLATE_REPLY = "您好，您当前的车牌号并不是有效号码，请重新输入。"
-PLATE_PRESENCE_ACK = "好的，我听到了您说的车牌的信息了。"
-CONFIRMATION_NO_ACK = "好的，我听到了您的修改内容，正在处理。"
 EDIT_UNCLEAR_REPLY = "我没有听清您要修改车牌的哪一处，当前仍保留原来的车牌。请您说明要替换、插入或删除哪一位。"
 EDIT_INVALID_REPLY = "我按这次修改后得到的车牌格式不符合规则，当前仍保留原来的车牌。请您重新说明要改哪一处。"
 
@@ -34,24 +50,8 @@ SPECIAL_PLATE_TAIL_CHARS = {"警", "临", "学", "领", "挂"}
 
 CAR_PLATE_EXTRACTION_PROMPT_PATH = Path(__file__).resolve().parents[1] / "car_plate_extraction_prompt.md"
 CAR_PLATE_EXTRACTION_PROMPT = CAR_PLATE_EXTRACTION_PROMPT_PATH.read_text(encoding="utf-8").strip()
-PRONUNCIATION_RULES_PROMPT = """
-### pronunciation 重点规则
-
-识别车牌时必须同时注意用户报号发音。用户说的是车牌字符的读音，不要把读音汉字写进 car_plate。
-
-| 标准字符 | 用户音频里可能说成 | 说明 |
-|----------|--------------------|------|
-| `0` | 洞 | 报号码时常用“洞”表示数字 0 |
-| `1` | 幺 | 报号码时常用“幺”表示数字 1 |
-| `4` | 是 | 连续报车牌时，“是”可能是数字 4 的近音 |
-| `6` | 陆 | “陆”是数字 6 在报号场景中的常用读法 |
-| `7` | 拐 | 报号码时常用“拐”表示数字 7 |
-| `C` | 吸 | 用户发音不标准时，C 可能听起来像“吸” |
-| `J` | 勾、沟儿 | 用户报车牌时可能用“勾”或“沟儿”表示字母 J |
-| `Q` | 圈 | 用户报车牌时可能用“圈”表示字母 Q |
-
-car_plate 只能包含省份简称、英文字母、数字，以及明确的特殊车牌尾字警、临、学、领、挂；不能包含洞、幺、是、陆、拐、吸、勾、沟儿、圈这些读音汉字。
-"""
+CONFUSION_PROVINCE_CHARS = {"甘", "赣", "津", "京", "桂", "贵", "冀", "吉"}
+CONFUSION_ALNUM_CHARS = {"2", "R", "1", "E"}
 
 
 def log_node_output(node: str, output: dict[str, Any]) -> None:
@@ -72,193 +72,6 @@ def log_node_output(node: str, output: dict[str, Any]) -> None:
     logger.info("plate_agent event=%s", json.dumps(payload, ensure_ascii=False, default=str))
 
 
-@dataclass(slots=True)
-class PlateConfusion:
-    position: int
-    value: str
-    reason: str
-    candidates: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_value(cls, value: Any) -> "PlateConfusion | None":
-        if not isinstance(value, dict):
-            return None
-        try:
-            position = int(value.get("position") or 0)
-        except (TypeError, ValueError):
-            position = 0
-        text_value = str(value.get("value") or "").strip()
-        reason = str(value.get("reason") or "").strip()
-        candidates_raw = value.get("candidates")
-        candidates = [str(item).strip() for item in candidates_raw] if isinstance(candidates_raw, list) else []
-        if position <= 0 and not text_value and not reason:
-            return None
-        return cls(position=position, value=text_value, reason=reason, candidates=[item for item in candidates if item])
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "position": self.position,
-            "value": self.value,
-            "candidates": self.candidates,
-            "reason": self.reason,
-        }
-
-
-@dataclass(slots=True)
-class PlateCharState:
-    position: int
-    value: str
-    confirmed: bool = False
-    needs_confirmation: bool = False
-    candidates: list[str] = field(default_factory=list)
-    reason: str = ""
-
-    @classmethod
-    def from_value(cls, value: Any) -> "PlateCharState | None":
-        if not isinstance(value, dict):
-            return None
-        try:
-            position = int(value.get("position") or 0)
-        except (TypeError, ValueError):
-            position = 0
-        text_value = normalize_edit_value(value.get("value") or value.get("char"))
-        confirmed = bool(value.get("confirmed"))
-        needs_confirmation = bool(value.get("needs_confirmation"))
-        candidates_raw = value.get("candidates")
-        candidates = [normalize_edit_value(item) for item in candidates_raw] if isinstance(candidates_raw, list) else []
-        reason = str(value.get("reason") or "").strip()
-        if position <= 0 or not text_value:
-            return None
-        return cls(
-            position=position,
-            value=text_value,
-            confirmed=confirmed,
-            needs_confirmation=needs_confirmation,
-            candidates=[item for item in candidates if item],
-            reason=reason,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "position": self.position,
-            "value": self.value,
-            "confirmed": self.confirmed,
-            "needs_confirmation": self.needs_confirmation,
-            "candidates": self.candidates,
-            "reason": self.reason,
-        }
-
-
-@dataclass(slots=True)
-class PlateAgentState:
-    car_plate: str = ""
-    plate_chars: list[PlateCharState] = field(default_factory=list)
-    confirmed: bool = False
-    need_confirm_chars: list[PlateCharState] = field(default_factory=list)
-    confirmed_chars: list[PlateCharState] = field(default_factory=list)
-    vehicle_type: str = "unknown"
-    confusions: list[PlateConfusion] = field(default_factory=list)
-    final_car_plate: str = ""
-    assistant_reply: str = ""
-    ack_sent: bool = False
-
-    @property
-    def has_car_plate(self) -> bool:
-        return bool(self.car_plate or self.plate_chars)
-
-    @property
-    def is_confirmed(self) -> bool:
-        return bool(self.confirmed or self.final_car_plate)
-
-    def to_context(self) -> dict[str, Any]:
-        return {
-            "car_plate": self.car_plate,
-            "plate_chars": [item.to_dict() for item in self.plate_chars],
-            "confirmed": self.is_confirmed,
-            "need_confirm_chars": [item.to_dict() for item in self.need_confirm_chars],
-            "confirmed_chars": [item.to_dict() for item in self.confirmed_chars],
-            "vehicle_type": self.vehicle_type,
-            "confusions": [item.to_dict() for item in self.confusions],
-            "final_car_plate": self.final_car_plate,
-            "assistant_reply": self.assistant_reply,
-            "ack_sent": self.ack_sent,
-        }
-
-
-@dataclass(slots=True)
-class PlateAgentResult:
-    text: str
-    history_text: str
-    speech_text: str
-    state: PlateAgentState
-    latency_ms: int
-    debug: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class PlateEditCommand:
-    action: str
-    position: int = 0
-    value: str = ""
-    old_value: str = ""
-    relation: str = "at"
-    occurrence: str = ""
-    raw: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "action": self.action,
-            "position": self.position,
-            "value": self.value,
-            "old_value": self.old_value,
-            "relation": self.relation,
-            "occurrence": self.occurrence,
-            "raw": self.raw,
-        }
-
-
-@dataclass(slots=True)
-class PlateUpdateReview:
-    confirmed_positions: list[int] = field(default_factory=list)
-    needs_more_edit: bool = False
-    valid_result: bool = True
-    reason: str = ""
-    raw: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "confirmed_positions": self.confirmed_positions,
-            "needs_more_edit": self.needs_more_edit,
-            "valid_result": self.valid_result,
-            "reason": self.reason,
-            "raw": self.raw,
-        }
-
-
-@dataclass(slots=True)
-class PlateEditResult:
-    car_plate: str
-    changed: bool
-    command: PlateEditCommand | None = None
-    changed_positions: list[int] = field(default_factory=list)
-    review: PlateUpdateReview | None = None
-    steps: list[dict[str, Any]] = field(default_factory=list)
-    error: str = ""
-    raw: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "car_plate": self.car_plate,
-            "changed": self.changed,
-            "command": self.command.to_dict() if self.command else None,
-            "changed_positions": self.changed_positions,
-            "review": self.review.to_dict() if self.review else None,
-            "steps": self.steps,
-            "error": self.error,
-            "raw": self.raw,
-        }
-
-
 class PlateAgentService:
     def __init__(self, model_client: ChatModel) -> None:
         self.model_client = model_client
@@ -270,7 +83,7 @@ class PlateAgentService:
         wav_bytes: bytes,
         state: PlateAgentState,
         session_id: str = "",
-        on_ack: Optional[Callable] = None,
+        on_ack: Any = None,
     ) -> PlateAgentResult:
         started = time.perf_counter()
         debug: dict[str, Any] = {}
@@ -288,6 +101,20 @@ class PlateAgentService:
                 "state": working.to_context(),
             },
         )
+        if on_ack is not None:
+            try:
+                _, ack_text = ack_schedule_for_state(working)[0]
+                await on_ack(ack_text)
+                log_node_output(
+                    "handle_audio_turn.compat_on_ack",
+                    {
+                        "action": "emit_compat_ack",
+                        "ack_text": ack_text,
+                        "state": working.to_context(),
+                    },
+                )
+            except Exception as exc:
+                logger.warning("plate_agent compat on_ack failed: %s", exc)
 
         if not working.has_car_plate:
             has_plate = await self.detect_plate_presence(model=model, wav_bytes=wav_bytes)
@@ -319,20 +146,6 @@ class PlateAgentService:
                     latency_ms=latency_ms,
                     debug=debug,
                 )
-
-            if not state.ack_sent:
-                working.ack_sent = True
-                log_node_output(
-                    "handle_audio_turn.initial_ack",
-                    {
-                        "action": "send_ack",
-                        "speech_text": PLATE_PRESENCE_ACK,
-                        "before_state": before_state,
-                        "state": working.to_context(),
-                    },
-                )
-                if on_ack is not None:
-                    await on_ack(PLATE_PRESENCE_ACK)
 
             working.ack_sent = False
 
@@ -453,20 +266,6 @@ class PlateAgentService:
                 debug=debug,
             )
 
-        if not state.ack_sent:
-            working.ack_sent = True
-            log_node_output(
-                "handle_audio_turn.update_ack",
-                {
-                    "action": "send_ack",
-                    "speech_text": CONFIRMATION_NO_ACK,
-                    "before_state": before_state,
-                    "state": working.to_context(),
-                },
-            )
-            if on_ack is not None:
-                await on_ack(CONFIRMATION_NO_ACK)
-
         working.ack_sent = False
 
         edit_result = await self.update_car_plate(model=model, wav_bytes=wav_bytes, state=working)
@@ -482,8 +281,8 @@ class PlateAgentService:
                 )
                 assistant_reply = (
                     await self.generate_reply(model=model, state=working, changed=False)
-                    if edit_result.command and edit_result.command.action == "none"
-                    else edit_result.error or EDIT_UNCLEAR_REPLY
+                    if (edit_result.command and edit_result.command.action == "none") or review_confirmed_positions
+                    else reply_with_pending_confirmation(edit_result.error or EDIT_UNCLEAR_REPLY, working)
                 )
                 working.assistant_reply = assistant_reply
                 output = build_output_json(
@@ -518,7 +317,7 @@ class PlateAgentService:
                     },
                 )
 
-            assistant_reply = edit_result.error or EDIT_UNCLEAR_REPLY
+            assistant_reply = reply_with_pending_confirmation(edit_result.error or EDIT_UNCLEAR_REPLY, working)
             working.confirmed = False
             working.final_car_plate = ""
             working.assistant_reply = assistant_reply
@@ -681,7 +480,10 @@ class PlateAgentService:
         debug: dict[str, Any],
         stage: str,
     ) -> PlateAgentResult:
-        assistant_reply = f"{EDIT_INVALID_REPLY}当前保留的车牌是{working.car_plate}。"
+        assistant_reply = reply_with_pending_confirmation(
+            f"{EDIT_INVALID_REPLY}当前保留的车牌是{working.car_plate}。",
+            working,
+        )
         working.confirmed = False
         working.final_car_plate = ""
         working.assistant_reply = assistant_reply
@@ -790,16 +592,18 @@ class PlateAgentService:
         extraction_result = await self.audio_call(
             model=model,
             wav_bytes=wav_bytes,
-            prompt=f"{CAR_PLATE_EXTRACTION_PROMPT}\n\n{PRONUNCIATION_RULES_PROMPT}",
+            prompt=CAR_PLATE_EXTRACTION_PROMPT,
             max_tokens=512,
         )
-        summarized_plate = extract_final_plate_from_text(extraction_result)
-        parsed_plate = clean_plate_text(parse_json_object(extraction_result).get("car_plate"))
+        summarized_raw = extract_final_plate_from_text(extraction_result)
+        summarized_plate = sanitize_extracted_plate_text(summarized_raw)
+        parsed_plate = extract_plate_from_json_object(parse_json_object(extraction_result))
         extraction_plate = summarized_plate or parsed_plate
         log_node_output(
             "extract_car_plate.step1_extract_with_pronunciation",
             {
                 "raw": extraction_result,
+                "summary_raw": summarized_raw,
                 "summary_car_plate": summarized_plate,
                 "json_car_plate": parsed_plate,
                 "car_plate": extraction_plate,
@@ -960,8 +764,28 @@ class PlateAgentService:
                 max_tokens=256,
             )
             command = parse_plate_edit_command(command_result)
+            log_node_output(
+                "update_car_plate.react_action",
+                {
+                    "step": step_index,
+                    "raw": command_result,
+                    "previous_state": state.to_context(),
+                    "tentative_state": tentative_state.to_context(),
+                    "input_plate": tentative_plate,
+                    "command": command.to_dict(),
+                },
+            )
             edit_result = apply_plate_edit_command(tentative_plate, command)
             edit_result.raw = command_result
+            log_node_output(
+                "update_car_plate.edit_result",
+                {
+                    "step": step_index,
+                    "input_plate": tentative_plate,
+                    "command": command.to_dict(),
+                    "edit_result": edit_result.to_dict(),
+                },
+            )
             review = await self.review_plate_update(
                 model=model,
                 wav_bytes=wav_bytes,
@@ -981,10 +805,9 @@ class PlateAgentService:
             }
             steps.append(step)
             log_node_output(
-                "update_car_plate.react_step",
+                "update_car_plate.react_step_done",
                 {
                     "step": step_index,
-                    "raw": command_result,
                     "previous_state": state.to_context(),
                     "tentative_state": tentative_state.to_context(),
                     "command": command.to_dict(),
@@ -1093,7 +916,7 @@ class PlateAgentService:
         car_plate: str,
         node: str,
     ) -> str:
-        formatted_plate = normalize_plate_format(car_plate)
+        formatted_plate = normalize_plate_format(sanitize_extracted_plate_text(car_plate))
         corrected_plate = formatted_plate
         retry_raw = ""
         retry_plate = ""
@@ -1111,7 +934,7 @@ class PlateAgentService:
 """,
                 max_tokens=128,
             )
-            retry_plate = normalize_plate_format(parse_json_object(retry_raw).get("car_plate"))
+            retry_plate = normalize_plate_format(extract_plate_from_json_object(parse_json_object(retry_raw)))
             if retry_plate:
                 corrected_plate = retry_plate
         final_plate = replace_leading_g_with_ji(corrected_plate)
@@ -1373,408 +1196,107 @@ def parse_json_object(text: Any) -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        value = json.loads(extract_json_candidate(raw))
+        value = json.loads(extract_json_candidate(raw, prefer_object=True))
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
 
 
-def build_plate_edit_command_prompt(
-    state: PlateAgentState,
-    *,
-    current_plate: str | None = None,
-    edit_steps: list[dict[str, Any]] | None = None,
-) -> str:
-    plate = normalize_plate_text(current_plate if current_plate is not None else state.car_plate)
-    if not state.plate_chars and plate:
-        temp_state = clone_state(state)
-        refresh_plate_state(
-            temp_state,
-            plate,
-            confusions=state.confusions,
-            confirmed=state.is_confirmed,
-            preserve_confirmed=False,
-        )
-        state_context = temp_state.to_context()
-    else:
-        state_context = state.to_context()
-    context = {
-        "current_car_plate": plate,
-        "plate_length": len(plate),
-        "confirmed": state.is_confirmed,
-        "plate_chars": state_context.get("plate_chars", []),
-        "vehicle_type": state.vehicle_type,
-        "need_confirm_chars": state_context.get("need_confirm_chars", []),
-        "confirmed_chars": state_context.get("confirmed_chars", []),
-        "previous_assistant_reply": state.assistant_reply,
-        "executed_edit_steps": edit_steps or [],
-    }
-    return f"""
-任务：根据用户最新音频，把用户的修改意图转换成一个车牌编辑函数调用。
+PLATE_JSON_KEY_ALIASES = {
+    "carplate",
+    "plate",
+    "platenumber",
+    "licenseplate",
+    "licenseplatenumber",
+    "finalplate",
+    "finalcarplate",
+    "finalplatenumber",
+    "finalcarnumber",
+    "车牌",
+    "车牌号",
+    "最终车牌",
+    "最终车牌号",
+}
 
-当前车牌状态：
-{json.dumps(context, ensure_ascii=False)}
-
-重要原则：
-1. 你不是车牌生成器，不要直接推理一个新的完整车牌。
-2. 你只负责判断用户这句话应该调用哪一个编辑函数，并输出这个函数需要的参数。
-3. 只能选择一个 action，不要同时输出多个编辑动作；如果已经有 executed_edit_steps，本次只输出尚未处理的下一个单一动作。
-4. position 使用 1 开始计数，必须对应 current_car_plate / plate_chars 里的当前位置。
-5. value 和 old_value 只能是单个车牌字符：省份简称、英文字母、数字、警、临、学、领、挂。
-6. 需要处理报号发音：洞=0，幺=1，是=4，陆=6，拐=7，吸=C，勾/沟儿=J，圈=Q。
-7. 用户只是确认某个待确认字符正确，例如“天津的津是对的”“那个 R 没错”，输出 none，不要输出替换动作。
-8. 如果用户修改意图已经被 executed_edit_steps 覆盖完，输出 none。
-9. 用户是否整体确认当前车牌由前一个节点判断；到你这里时，只要不是明确修改，就输出 none 或 unknown。
-10. 不要输出解释，不要输出自然语言，只输出 JSON 对象。
-
-可调用编辑函数：
-
-def replace_position(position: int, value: str)
-说明：用户明确说要把某个位置改成某个字符时使用。
-适用表达：第 3 位改成 R、倒数第 1 位改成临、前面那个改成 E。
-必须条件：能确定 position，并且能确定新的单字符 value。
-输出：{{"action":"replace_position","position":3,"value":"R"}}
-
-def replace_char(old_value: str, value: str, occurrence: str = "")
-说明：用户明确说把当前车牌里的某个具体字符替换成另一个字符时使用。
-适用表达：把临改成 0、不是 R 是 2、那个 E 改成 1。
-必须条件：能确定 old_value 和 value；如果 old_value 在当前车牌里出现多次，必须能确定 occurrence。
-occurrence 可选值：first 表示前面的，last 表示后面的，all 表示全部；只出现一次可以留空。
-输出：{{"action":"replace_char","old_value":"临","value":"0"}}
-
-def insert_position(position: int, value: str, relation: str)
-说明：用户明确说要在某个位置前面或后面加一个字符时使用。
-适用表达：第 3 位后面加 5、R 前面加 2、最后一位前面插个 A。
-必须条件：能确定锚点 position、插入字符 value、插入关系 relation。
-relation 只能是 before 或 after；如果用户说“插到第 3 位”，按 before 处理。
-输出：{{"action":"insert_position","position":3,"value":"5","relation":"after"}}
-
-def delete_position(position: int)
-说明：用户明确说删除当前车牌某个位置的字符时使用。
-适用表达：删掉最后一位、不要第 4 位、把前面那个多余的字符去掉。
-必须条件：能确定要删除的 position。
-输出：{{"action":"delete_position","position":{len(plate)}}}
-
-def none()
-说明：用户是在确认当前车牌或确认某个待确认字符，没有要求修改车牌时使用。
-适用表达：对、没错、天津的津没错、那个 R 是对的。
-输出：{{"action":"none"}}
-
-def unknown()
-说明：无法可靠转换成以上单一编辑动作时使用。
-适用情况：位置不清楚、新字符不清楚、一次说了多个修改、用户重新报了一整段但没有明确编辑关系。
-输出：{{"action":"unknown"}}
-
-输出格式：
-{{"action":"replace_position","position":3,"value":"R"}}
-""".strip()
+UNKNOWN_PLATE_VALUES = {"", "?", "？", "UNKNOWN", "NONE", "NULL", "INVALID", "无", "未知", "不确定"}
 
 
-def build_plate_update_review_prompt(context: dict[str, Any]) -> str:
-    return f"""
-任务：对刚才的车牌编辑步骤做一次 ReAct 复核，但不要直接改车牌。
-
-你需要根据同一段用户语音和当前上下文判断：
-1. 用户这轮到底是在确认哪些位、修改哪些位，还是还有未处理的修改意图。
-2. 已执行编辑步骤是否已经覆盖用户意图。
-3. after_plate 是否是一个合理的中间或最终结果。
-4. 用户本轮明确确认过的车牌位置有哪些，需要加入 confirmed_positions。
-
-当前上下文：
-{json.dumps(context, ensure_ascii=False)}
-
-判断规则：
-1. 如果用户明确说某个待确认字符是对的，例如“天津的津对”“那个 R 没错”“临是对的”，把对应 position 放进 confirmed_positions。
-2. 如果用户明确把某一位改成新字符，且本轮编辑正确执行了这个修改，也把该 position 放进 confirmed_positions。
-3. 如果修改后的字符已经不是易混淆字符，后端会自动从 need_confirm_chars 删除；你只需要把用户明确确认的位置输出出来。
-4. 如果用户还表达了另一个未处理的修改动作，needs_more_edit=true。
-5. 如果当前编辑动作和用户语音明显不一致，valid_result=false。
-6. 如果编辑已经覆盖用户意图，needs_more_edit=false。
-7. 不要输出推理过程，不要输出自然语言，只输出 JSON。
-
-输出 JSON 字段：
-{{
-  "confirmed_positions": [1, 4],
-  "needs_more_edit": false,
-  "valid_result": true,
-  "reason": "简短说明"
-}}
-""".strip()
-
-
-def parse_plate_edit_command(text: Any) -> PlateEditCommand:
-    data = parse_json_object(text)
-    tool_calls = data.get("tool_calls")
-    if isinstance(tool_calls, list) and tool_calls:
-        first_tool = tool_calls[0]
-        function_data = first_tool.get("function") if isinstance(first_tool, dict) else None
-        if isinstance(function_data, dict):
-            arguments = parse_arguments_object(function_data.get("arguments"))
-            if isinstance(arguments, dict):
-                data = {**arguments, "action": data.get("action") or function_data.get("name") or arguments.get("action")}
-            else:
-                data = {**data, "action": data.get("action") or function_data.get("name")}
-
-    function_call = data.get("function_call")
-    if isinstance(function_call, dict):
-        arguments = parse_arguments_object(function_call.get("arguments"))
-        if isinstance(arguments, dict):
-            data = {**arguments, "action": data.get("action") or function_call.get("name") or arguments.get("action")}
-        else:
-            data = {**data, "action": data.get("action") or function_call.get("name")}
-
-    arguments = data.get("arguments")
-    if isinstance(arguments, dict):
-        data = {**arguments, "action": data.get("action") or data.get("name") or arguments.get("action")}
-
-    action = normalize_edit_action(data.get("action") or data.get("name") or data.get("function"))
-    position = parse_positive_int(
-        data.get("position")
-        or data.get("index")
-        or data.get("target_position")
-        or data.get("anchor_position")
-    )
-    value = normalize_edit_value(
-        data.get("value")
-        or data.get("new_value")
-        or data.get("new_char")
-        or data.get("char")
-        or data.get("insert_value")
-        or data.get("replacement")
-    )
-    old_value = normalize_edit_value(
-        data.get("old_value")
-        or data.get("old_char")
-        or data.get("target_value")
-        or data.get("target_char")
-        or data.get("source_value")
-        or data.get("source_char")
-        or data.get("from")
-    )
-    relation = normalize_relation(data.get("relation") or data.get("where"))
-    occurrence = normalize_occurrence(data.get("occurrence") or data.get("which"))
-    return PlateEditCommand(
-        action=action,
-        position=position,
-        value=value,
-        old_value=old_value,
-        relation=relation,
-        occurrence=occurrence,
-        raw=data,
-    )
-
-
-def parse_arguments_object(value: Any) -> dict[str, Any] | None:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-    return None
-
-
-def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> PlateEditResult:
-    plate = normalize_plate_text(current_plate)
-    action = command.action
-    if action == "none":
-        return PlateEditResult(
-            car_plate=plate,
-            changed=False,
-            command=command,
-            error=f"当前仍保留原来的车牌{plate}，请您确认是否正确。",
-        )
-    if action == "unknown":
-        return PlateEditResult(car_plate=plate, changed=False, command=command, error=EDIT_UNCLEAR_REPLY)
-
-    chars = list(plate)
-    if action == "replace_position":
-        if not valid_existing_position(command.position, chars) or not command.value:
-            return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
-        chars[command.position - 1] = command.value
-        return edit_success(chars, command, changed_positions=[command.position])
-
-    if action == "replace_char":
-        if not command.old_value or not command.value:
-            return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
-        indexes = [index for index, char in enumerate(chars) if char == command.old_value]
-        if not indexes:
-            return edit_error(plate, command, f"当前车牌里没有{describe_plate_char(command.old_value)}，所以没有修改。当前仍保留原来的车牌。")
-        if command.occurrence == "all":
-            changed_positions = [index + 1 for index in indexes]
-            for index in indexes:
-                chars[index] = command.value
-            return edit_success(chars, command, changed_positions=changed_positions)
-        if len(indexes) > 1 and command.occurrence not in {"first", "last"}:
-            return edit_error(
-                plate,
-                command,
-                f"当前车牌里有多个{describe_plate_char(command.old_value)}，请您说明要改前面的还是后面的。",
-            )
-        index = indexes[0] if command.occurrence != "last" else indexes[-1]
-        chars[index] = command.value
-        return edit_success(chars, command, changed_positions=[index + 1])
-
-    if action == "insert_position":
-        if not command.value or command.position <= 0:
-            return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
-        insert_index = command.position - 1
-        if command.relation == "after":
-            insert_index = command.position
-        if insert_index < 0 or insert_index > len(chars):
-            return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
-        chars.insert(insert_index, command.value)
-        return edit_success(chars, command, changed_positions=[insert_index + 1])
-
-    if action == "delete_position":
-        if not valid_existing_position(command.position, chars):
-            return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
-        del chars[command.position - 1]
-        return edit_success(chars, command, changed_positions=[])
-
-    return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
-
-
-def edit_success(chars: list[str], command: PlateEditCommand, *, changed_positions: list[int]) -> PlateEditResult:
-    return PlateEditResult(
-        car_plate=normalize_plate_text("".join(chars)),
-        changed=True,
-        command=command,
-        changed_positions=changed_positions,
-    )
-
-
-def edit_error(plate: str, command: PlateEditCommand, error: str) -> PlateEditResult:
-    return PlateEditResult(
-        car_plate=normalize_plate_text(plate),
-        changed=False,
-        command=command,
-        error=error,
-    )
-
-
-def normalize_edit_action(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    aliases = {
-        "replace_position": "replace_position",
-        "replace_at_position": "replace_position",
-        "replace_by_position": "replace_position",
-        "position_replace": "replace_position",
-        "替换位置": "replace_position",
-        "替换某位": "replace_position",
-        "replace_char": "replace_char",
-        "replace_symbol": "replace_char",
-        "replace_value": "replace_char",
-        "replace_specific_char": "replace_char",
-        "替换字符": "replace_char",
-        "替换符号": "replace_char",
-        "insert_position": "insert_position",
-        "insert": "insert_position",
-        "insert_char": "insert_position",
-        "插入": "insert_position",
-        "添加": "insert_position",
-        "delete_position": "delete_position",
-        "delete": "delete_position",
-        "remove": "delete_position",
-        "删除": "delete_position",
-        "none": "none",
-        "confirm": "none",
-        "确认": "none",
-        "unknown": "unknown",
-        "unclear": "unknown",
-        "不清楚": "unknown",
-    }
-    return aliases.get(raw, "unknown")
-
-
-def normalize_edit_value(value: Any) -> str:
-    text = normalize_spoken_plate_chars(value)
-    if not text:
+def extract_plate_from_json_object(data: Any) -> str:
+    if not isinstance(data, dict):
         return ""
-    text = normalize_plate_format(text)
-    return text[0] if len(text) == 1 else ""
-
-
-def normalize_spoken_plate_chars(value: Any) -> str:
-    text = clean_plate_text(value)
-    replacements = {
-        "洞": "0",
-        "幺": "1",
-        "么": "1",
-        "是": "4",
-        "陆": "6",
-        "拐": "7",
-        "吸": "C",
-        "勾": "J",
-        "沟儿": "J",
-        "圈": "Q",
-    }
-    for source, target in replacements.items():
-        text = text.replace(source, target)
-    return text
-
-
-def normalize_relation(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return "at"
-    if raw in {"after", "behind", "后", "后面", "之后"}:
-        return "after"
-    return "before"
-
-
-def normalize_occurrence(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if raw in {"first", "front", "前", "前面", "第一个"}:
-        return "first"
-    if raw in {"last", "back", "后", "后面", "最后一个"}:
-        return "last"
-    if raw in {"all", "全部", "所有"}:
-        return "all"
+    for key, value in data.items():
+        normalized_key = normalize_json_key(key)
+        if normalized_key in PLATE_JSON_KEY_ALIASES:
+            plate = sanitize_extracted_plate_text(value)
+            if plate:
+                return plate
     return ""
 
 
-def parse_positive_int(value: Any) -> int:
-    raw = str(value or "").strip()
-    try:
-        number = int(raw)
-    except (TypeError, ValueError):
-        number = parse_chinese_position(raw)
-    return number if number > 0 else 0
+def sanitize_extracted_plate_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return extract_plate_from_json_object(value)
+    if not isinstance(value, str):
+        return ""
+
+    raw = value.strip()
+    if not raw:
+        return ""
+
+    for variant in jsonish_text_variants(raw):
+        if looks_like_json_fragment(variant):
+            nested_plate = extract_plate_from_json_object(parse_json_object(variant))
+            if nested_plate:
+                return nested_plate
+            return ""
+
+    converted = normalize_spoken_plate_chars(raw)
+    compact = clean_plate_text(converted).upper()
+    if compact in UNKNOWN_PLATE_VALUES:
+        return ""
+
+    chars: list[str] = []
+    for char in compact:
+        if char in PROVINCE_ABBREVIATIONS or char in SPECIAL_PLATE_TAIL_CHARS:
+            chars.append(char)
+        elif char.isascii() and char.isalnum():
+            chars.append(char.upper())
+
+    plate = "".join(chars)
+    if not plate or plate in UNKNOWN_PLATE_VALUES:
+        return ""
+    if len(plate) < 2:
+        return ""
+    if normalize_json_key(plate) in PLATE_JSON_KEY_ALIASES or "CARPLATE" in plate:
+        return ""
+    return plate
 
 
-def parse_chinese_position(value: str) -> int:
-    raw = re.sub(r"\s+", "", str(value or ""))
-    raw = raw.replace("第", "").replace("位", "").replace("个", "")
-    digits = {
-        "一": 1,
-        "二": 2,
-        "两": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-        "六": 6,
-        "七": 7,
-        "八": 8,
-        "九": 9,
-    }
-    if raw in digits:
-        return digits[raw]
-    if raw == "十":
-        return 10
-    if raw.startswith("十") and raw[1:] in digits:
-        return 10 + digits[raw[1:]]
-    if "十" in raw:
-        left, right = raw.split("十", 1)
-        if left in digits:
-            return digits[left] * 10 + (digits.get(right, 0) if right else 0)
-    return 0
+def jsonish_text_variants(value: str) -> list[str]:
+    variants = [value]
+    if "\\" in value:
+        variants.append(value.replace('\\"', '"').replace("\\", ""))
+    return unique_text_values(variants)
 
 
-def valid_existing_position(position: int, chars: list[str]) -> bool:
-    return 1 <= position <= len(chars)
+def looks_like_json_fragment(value: str) -> bool:
+    text = value.strip()
+    return ("{" in text and "}" in text) or ("[" in text and "]" in text)
+
+
+def normalize_json_key(value: Any) -> str:
+    return re.sub(r"[\s_\\/:：\"'`{}【】\[\]()-]+", "", str(value or "")).lower()
+
+
+def unique_text_values(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def extract_final_plate_from_text(text: Any) -> str:
@@ -1782,7 +1304,7 @@ def extract_final_plate_from_text(text: Any) -> str:
     matches = re.findall(r"^最终车牌[:：]\s*(.+)$", raw, flags=re.MULTILINE)
     if not matches:
         return ""
-    return clean_plate_text(matches[-1])
+    return matches[-1].strip()
 
 
 def parse_bool_text(text: str, *, default: bool) -> bool:
@@ -1900,58 +1422,20 @@ def is_valid_plate_number(car_plate: str) -> bool:
 def detect_initial_confusions_by_rule(car_plate: str) -> list[PlateConfusion]:
     plate = clean_plate_text(car_plate)
     confusions: list[PlateConfusion] = []
-    if plate:
-        first = plate[0]
-        if first in {"甘", "赣"}:
-            confusions.append(
-                PlateConfusion(
-                    position=1,
-                    value=first,
-                    reason=f"第1位当前识别为{describe_plate_char(first)}，请用户确认。",
-                )
-            )
-        if first in {"津", "京"}:
-            confusions.append(
-                PlateConfusion(
-                    position=1,
-                    value=first,
-                    reason=f"第1位当前识别为{describe_plate_char(first)}，请用户确认。",
-                )
-            )
-        if first in {"桂", "贵"}:
-            confusions.append(
-                PlateConfusion(
-                    position=1,
-                    value=first,
-                    reason=f"第1位当前识别为{describe_plate_char(first)}，请用户确认。",
-                )
-            )
-        if first in {"冀", "吉"}:
-            confusions.append(
-                PlateConfusion(
-                    position=1,
-                    value=first,
-                    reason=f"第1位当前识别为{describe_plate_char(first)}，请用户确认。",
-                )
-            )
+    if plate and plate[0] in CONFUSION_PROVINCE_CHARS:
+        confusions.append(build_confusion(position=1, value=plate[0]))
     for index, value in enumerate(plate, start=1):
-        if value in {"2", "R"}:
-            confusions.append(
-                PlateConfusion(
-                    position=index,
-                    value=value,
-                    reason=f"第{index}位当前识别为{describe_plate_char(value)}，请用户确认。",
-                )
-            )
-        if value in {"1", "E"}:
-            confusions.append(
-                PlateConfusion(
-                    position=index,
-                    value=value,
-                    reason=f"第{index}位当前识别为{describe_plate_char(value)}，请用户确认。",
-                )
-            )
+        if value in CONFUSION_ALNUM_CHARS:
+            confusions.append(build_confusion(position=index, value=value))
     return with_relative_confusion_reasons(plate, confusions)
+
+
+def build_confusion(*, position: int, value: str) -> PlateConfusion:
+    return PlateConfusion(
+        position=position,
+        value=value,
+        reason=f"第{position}位当前识别为{describe_plate_char(value)}，请用户确认。",
+    )
 
 
 def with_relative_confusion_reasons(car_plate: str, confusions: list[PlateConfusion]) -> list[PlateConfusion]:
@@ -1988,43 +1472,6 @@ def relative_confusion_reason(car_plate: str, item: PlateConfusion) -> str:
     return f"当前识别为{value_label}的位置，请用户确认是否正确。"
 
 
-def duplicate_confusion_label(car_plate: str, index: int, value: str) -> str:
-    key = confusion_group_key(value)
-    if not key:
-        return ""
-    positions = [idx for idx, char in enumerate(car_plate) if confusion_group_key(char) == key]
-    if len(positions) <= 1 or index not in positions:
-        return ""
-    rank = positions.index(index)
-    label = describe_plate_char(value)
-    if len(positions) == 2:
-        prefix = "前面的" if rank == 0 else "后面的"
-    elif rank == 0:
-        prefix = "最前面的"
-    elif rank == len(positions) - 1:
-        prefix = "最后面的"
-    else:
-        prefix = "中间的"
-    return f"{prefix}{label}"
-
-
-def confusion_group_key(value: str) -> str:
-    value = str(value or "").upper()
-    if value in {"2", "R"}:
-        return "2/R"
-    if value in {"1", "E"}:
-        return "1/E"
-    if value in {"甘", "赣"}:
-        return "甘/赣"
-    if value in {"津", "京"}:
-        return "津/京"
-    if value in {"桂", "贵"}:
-        return "桂/贵"
-    if value in {"冀", "吉"}:
-        return "冀/吉"
-    return ""
-
-
 def describe_plate_char(value: str) -> str:
     labels = {
         "赣": "江西的赣",
@@ -2053,14 +1500,56 @@ def describe_plate_char(value: str) -> str:
 def fallback_reply(state: PlateAgentState) -> str:
     plate = state.car_plate or "当前车牌"
     parts = [f"我这边暂时识别到的车牌号是{plate}。"]
-    if state.confusions:
-        descriptions = [item.reason.rstrip("。") for item in with_relative_confusion_reasons(state.car_plate, state.confusions)]
+    descriptions = pending_confirmation_descriptions(state)
+    if descriptions:
         parts.append("请您再确认一下：" + "；".join(descriptions) + "。")
     else:
         parts.append("请您确认一下是否正确。")
     if state.vehicle_type == "new_energy":
         parts.append("另外这是新能源号牌吗？")
     return "".join(parts)
+
+
+def reply_with_pending_confirmation(base_reply: str, state: PlateAgentState) -> str:
+    reply = str(base_reply or "").strip()
+    descriptions = pending_confirmation_descriptions(state)
+    if descriptions:
+        suffix = "当前仍需您确认：" + "；".join(descriptions) + "。"
+    else:
+        plate = state.car_plate or "当前保留的车牌"
+        suffix = f"请您确认{plate}是否正确。"
+    if not reply:
+        return suffix
+    if not reply.endswith(("。", "！", "？", ".", "!", "?")):
+        reply += "。"
+    return reply + suffix
+
+
+def pending_confirmation_descriptions(state: PlateAgentState) -> list[str]:
+    descriptions: list[str] = []
+    if state.need_confirm_chars:
+        for item in state.need_confirm_chars:
+            reason = normalize_confirmation_reason(item.reason)
+            if not reason:
+                reason = f"第{item.position}位当前识别为{describe_plate_char(item.value)}，请您确认是否正确"
+            descriptions.append(reason)
+        return descriptions
+
+    for item in with_relative_confusion_reasons(state.car_plate, state.confusions):
+        reason = normalize_confirmation_reason(item.reason)
+        if not reason:
+            reason = f"第{item.position}位当前识别为{describe_plate_char(item.value)}，请您确认是否正确"
+        descriptions.append(reason)
+    return descriptions
+
+
+def normalize_confirmation_reason(value: str) -> str:
+    reason = str(value or "").strip().rstrip("。")
+    if not reason:
+        return ""
+    reason = reason.replace("请用户确认是否正确", "请您确认是否正确")
+    reason = reason.replace("请用户确认", "请您确认")
+    return reason
 
 
 def contains_absolute_position_text(value: str) -> bool:

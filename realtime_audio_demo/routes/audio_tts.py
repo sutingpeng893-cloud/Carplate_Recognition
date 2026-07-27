@@ -34,6 +34,7 @@ from realtime_audio_demo.services.qwen import (
 from realtime_audio_demo.services.audio_processing import audio_transcoder
 from realtime_audio_demo.services.model_gateway import model_gateway
 from realtime_audio_demo.services.plate_agent import PlateAgentState, get_plate_agent_service
+from realtime_audio_demo.services.plate_agent_ack import emit_scheduled_acks
 from realtime_audio_demo.services.prompt_provider import system_prompt_provider
 from realtime_audio_demo.services.speech import speech_streaming_supported, speech_synthesizer
 from realtime_audio_demo.services.silero_vad import SileroVadConfig, SileroVadSession, SileroVadUnavailable
@@ -232,27 +233,36 @@ async def chatbox_audio_stream(request: Request) -> StreamingResponse:
 
         agent_task = asyncio.create_task(
             agent.handle_audio_turn(
-                model=model, wav_bytes=input_wav_bytes, state=state, session_id=session_id, on_ack=on_ack,
+                model=model, wav_bytes=input_wav_bytes, state=state, session_id=session_id,
             )
         )
+        ack_task = asyncio.create_task(
+            emit_scheduled_acks(state=state, on_ack=on_ack, is_result_ready=agent_task.done)
+        )
 
-        # Yield ack events as they arrive from the agent
-        while not agent_task.done() or not ack_queue.empty():
+        try:
+            while not agent_task.done() or not ack_queue.empty():
+                try:
+                    ack_text = await asyncio.wait_for(ack_queue.get(), timeout=0.2)
+                    ack_event: dict[str, Any] = {"stage": "ack", "speech_text": ack_text}
+                    yield sse_data_event(ack_event)
+                    if should_synthesize:
+                        audio_index += 1
+                        async for tts_event in stream_speech_sse_events(
+                            model=model,
+                            text=ack_text,
+                            segment="ack",
+                            audio_index=audio_index,
+                        ):
+                            yield tts_event
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            ack_task.cancel()
             try:
-                ack_text = await asyncio.wait_for(ack_queue.get(), timeout=0.2)
-                ack_event: dict[str, Any] = {"stage": "ack", "speech_text": ack_text}
-                yield sse_data_event(ack_event)
-                if should_synthesize:
-                    audio_index += 1
-                    async for tts_event in stream_speech_sse_events(
-                        model=model,
-                        text=ack_text,
-                        segment="ack",
-                        audio_index=audio_index,
-                    ):
-                        yield tts_event
-            except asyncio.TimeoutError:
-                continue
+                await ack_task
+            except asyncio.CancelledError:
+                pass
 
         agent_result = await agent_task
 
@@ -872,13 +882,25 @@ async def finalize_session(session: AudioSession) -> None:
                 audio_url = await synthesize_speech_audio(session.model, text)
             await send_event(session, "processing_ack", {"speech_text": text, "audio_data_url": audio_url})
 
-        agent_result = await agent.handle_audio_turn(
-            model=session.model,
-            wav_bytes=input_wav,
-            state=state,
-            session_id=session.chat_session_id,
-            on_ack=on_ack,
+        agent_task = asyncio.create_task(
+            agent.handle_audio_turn(
+                model=session.model,
+                wav_bytes=input_wav,
+                state=state,
+                session_id=session.chat_session_id,
+            )
         )
+        ack_task = asyncio.create_task(
+            emit_scheduled_acks(state=state, on_ack=on_ack, is_result_ready=agent_task.done)
+        )
+        try:
+            agent_result = await agent_task
+        finally:
+            ack_task.cancel()
+            try:
+                await ack_task
+            except asyncio.CancelledError:
+                pass
     except Exception as exc:
         await send_event(
             session,

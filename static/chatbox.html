@@ -609,7 +609,7 @@
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <script type="module">
-      import { RealtimeAudioClient } from "/static/realtime-audio-client.js?v=chatbox-stream-tts-20260715-1";
+      import { RealtimeAudioClient } from "/static/realtime-audio-client.js?v=chatbox-stream-tts-20260727-ack-all";
 
       const els = {
         appShell: document.getElementById("appShell"),
@@ -803,10 +803,8 @@
 
       client.on("ack", ({ text, audio_url }) => {
         const ackText = text || "";
-        if (
-          assistantBubble &&
-          ["正在推理。", "判断是否说完。", "正在生成..."].includes(assistantBubble.textContent)
-        ) {
+        if (!ackText) return;
+        if (assistantBubble && isAssistantPlaceholder(assistantBubble.textContent)) {
           assistantBubble.classList.remove("loading");
           assistantBubble.textContent = ackText;
         } else {
@@ -996,6 +994,10 @@
           updateTextControls();
           scrollToBottom();
         }
+      }
+
+      function isAssistantPlaceholder(text) {
+        return ["正在推理。", "判断是否说完。", "正在生成..."].includes(text || "");
       }
 
       function appendBubble(role, text) {
