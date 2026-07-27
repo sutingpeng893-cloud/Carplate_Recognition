@@ -208,7 +208,7 @@ async def chatbox_audio_stream(request: Request) -> StreamingResponse:
 
         agent_task = asyncio.create_task(
             agent.handle_audio_turn(
-                model=model, wav_bytes=input_wav_bytes, state=state, on_ack=on_ack,
+                model=model, wav_bytes=input_wav_bytes, state=state, session_id=session_id, on_ack=on_ack,
             )
         )
 
@@ -852,6 +852,7 @@ async def finalize_session(session: AudioSession) -> None:
             model=session.model,
             wav_bytes=input_wav,
             state=state,
+            session_id=session.chat_session_id,
             on_ack=on_ack,
         )
     except Exception as exc:

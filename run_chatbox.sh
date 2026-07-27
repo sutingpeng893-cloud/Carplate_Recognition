@@ -42,13 +42,7 @@ if [[ -f "${PID_FILE}" ]]; then
   rm -f "${PID_FILE}"
 fi
 
-if command -v uv >/dev/null 2>&1; then
-  RUNNER=(uv run python -m uvicorn app:app)
-else
-  RUNNER=(python -m uvicorn app:app)
-fi
-
-nohup "${RUNNER[@]}" --host "${HOST}" --port "${PORT}" --log-level info > "${LOG_FILE}" 2>&1 &
+nohup python -m uvicorn app:app --host "${HOST}" --port "${PORT}" --log-level info > "${LOG_FILE}" 2>&1 &
 pid="$!"
 echo "${pid}" > "${PID_FILE}"
 

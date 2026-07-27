@@ -147,6 +147,7 @@ class ChatboxApplicationService:
                 model=model,
                 wav_bytes=input_wav_bytes,
                 state=state,
+                session_id=session_id,
             )
         except Exception as exc:
             return {"message": f"upstream audio request failed: {exc}"}, 502
