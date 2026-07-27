@@ -1,7 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 export QWEN_API_BASE="${QWEN_API_BASE:-http://127.0.0.1:5440/v1}"
@@ -29,13 +28,13 @@ export EASYTURN_ACK_TEXT="${EASYTURN_ACK_TEXT:-嗯，我在听，你继续。}"
 export SYSTEM_PROMPT_PATH="${SYSTEM_PROMPT_PATH:-${SCRIPT_DIR}/realtime_audio_demo/system_prompt.md}"
 
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-56010}"
+PORT="${PORT:-55785}"
 PID_FILE="${PID_FILE:-${SCRIPT_DIR}/chatbox.pid}"
 LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/chatbox.log}"
 
-if [[ -f "${PID_FILE}" ]]; then
+if [ -f "${PID_FILE}" ]; then
   old_pid="$(cat "${PID_FILE}" || true)"
-  if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
+  if [ -n "${old_pid}" ] && kill -0 "${old_pid}" 2>/dev/null; then
     echo "chatbox already running: pid=${old_pid}"
     exit 0
   fi
