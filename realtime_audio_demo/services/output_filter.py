@@ -3,6 +3,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from realtime_audio_demo.services.plate_agent_messages import (
+    NORMALIZED_INVALID_PLATE_REPLY,
+    NORMALIZED_SHORT_PLATE_REPLY,
+)
+
 
 @dataclass
 class AssistantOutput:
@@ -142,10 +147,10 @@ def validate_current_normalized_plate(text: str | None) -> str | None:
 
     if plate_length < 7:
         data["task_status"] = "need_more_info"
-        data["assistant_reply"] = "当前您提供的车牌位数不符合要求。请您重新输入车牌。"
+        data["assistant_reply"] = NORMALIZED_SHORT_PLATE_REPLY
     else:
         data["task_status"] = "invalid"
-        data["assistant_reply"] = "请重新输入车牌，车牌格式不符合要求。"
+        data["assistant_reply"] = NORMALIZED_INVALID_PLATE_REPLY
 
     return format_json_value(data)
 

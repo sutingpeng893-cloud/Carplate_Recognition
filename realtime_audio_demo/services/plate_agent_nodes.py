@@ -1,15 +1,8 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from realtime_audio_demo.config import QWEN_MODEL
-from realtime_audio_demo.services.plate_agent_constants import (
-    CAR_PLATE_EXTRACTION_PROMPT,
-    EDIT_INVALID_REPLY,
-    EDIT_UNCLEAR_REPLY,
-    INVALID_PLATE_REPLY,
-)
+from realtime_audio_demo.services.plate_agent_constants import CAR_PLATE_EXTRACTION_PROMPT
 from realtime_audio_demo.services.plate_agent_confirmation import (
     apply_confirmation_actions,
     complete_confirmation_actions,
@@ -30,22 +23,26 @@ from realtime_audio_demo.services.plate_agent_parsing import (
     unique_positions,
 )
 from realtime_audio_demo.services.plate_agent_prompts import (
-    build_confirmation_detection_prompt,
+    build_confirmation_detection_prompt_with_history,
     build_confirmation_state_action_prompt,
     build_plate_edit_command_prompt,
     build_plate_presence_prompt,
     build_plate_update_review_prompt,
     build_province_retry_prompt,
-    build_reply_generation_prompt,
 )
 from realtime_audio_demo.services.plate_agent_response import (
     build_output_json,
-    fallback_reply,
     reply_with_pending_confirmation,
+)
+from realtime_audio_demo.services.plate_agent_messages import (
+    EDIT_MULTI_STEP_PARTIAL_REPLY,
+    EDIT_UNCLEAR_REPLY,
+    INVALID_PLATE_REPLY,
+    build_edit_invalid_reply,
+    build_fixed_reply,
 )
 from realtime_audio_demo.services.plate_agent_rules import (
     clean_plate_text,
-    contains_absolute_position_text,
     detect_initial_confusions_by_rule,
     first_char_is_ascii_letter_or_digit,
     is_valid_plate_number,
@@ -54,7 +51,6 @@ from realtime_audio_demo.services.plate_agent_rules import (
     plate_length,
     replace_leading_g_with_ji,
     vehicle_type_by_length,
-    with_relative_confusion_reasons,
 )
 from realtime_audio_demo.services.plate_agent_state import (
     clone_state,
@@ -139,10 +135,7 @@ class PlateAgentNodesMixin:
         debug: dict[str, Any],
         stage: str,
     ) -> PlateAgentResult:
-        assistant_reply = reply_with_pending_confirmation(
-            f"{EDIT_INVALID_REPLY}当前保留的车牌是{working.car_plate}。",
-            working,
-        )
+        assistant_reply = build_edit_invalid_reply(working)
         working.confirmed = False
         working.final_car_plate = ""
         working.assistant_reply = assistant_reply
@@ -308,6 +301,7 @@ class PlateAgentNodesMixin:
             "rule_confusions": [item.to_dict() for item in rule_confusions],
             "confirmed_positions_from_review": confirmed_positions,
             "assistant_reply": state.assistant_reply,
+            "recent_turn_summaries": list(state.turn_summaries),
         }
         raw = await self.audio_call(
             model=model,
@@ -348,7 +342,7 @@ class PlateAgentNodesMixin:
         result = await self.audio_call(
             model=model,
             wav_bytes=wav_bytes,
-            prompt=build_confirmation_detection_prompt(previous_ai_reply),
+            prompt=build_confirmation_detection_prompt_with_history(previous_ai_reply, state.turn_summaries),
             max_tokens=8,
         )
         confirmed = parse_yes_no(result, default=False)
@@ -513,7 +507,7 @@ class PlateAgentNodesMixin:
                 return edit_result
 
         if final_result is not None:
-            final_result.error = final_result.error or "这次修改包含多步内容，我先处理到目前能确定的位置，请您继续确认或说明剩余要改的部分。"
+            final_result.error = final_result.error or EDIT_MULTI_STEP_PARTIAL_REPLY
             return final_result
         return PlateEditResult(car_plate=current_plate, changed=False, error=EDIT_UNCLEAR_REPLY)
 
@@ -611,51 +605,15 @@ class PlateAgentNodesMixin:
         )
         return final_plate
 
-    async def generate_reply(self, *, model: str, state: PlateAgentState, changed: bool) -> str:
-        result, status_code = await self.model_client.complete_text(
-            model=model or QWEN_MODEL,
-            text=json.dumps(
-                {
-                    "car_plate": state.car_plate,
-                    "plate_chars": [item.to_dict() for item in state.plate_chars],
-                    "confirmed": state.is_confirmed,
-                    "vehicle_type": state.vehicle_type,
-                    "need_confirm_chars": [item.to_dict() for item in state.need_confirm_chars],
-                    "confirmed_chars": [item.to_dict() for item in state.confirmed_chars],
-                    "confusions": [item.to_dict() for item in with_relative_confusion_reasons(state.car_plate, state.confusions)],
-                    "changed": changed,
-                },
-                ensure_ascii=False,
-            ),
-            prompt=build_reply_generation_prompt(),
-            history=[],
-            max_tokens=256,
-            output_audio=False,
-        )
-        if status_code >= 400:
-            reply = fallback_reply(state)
-            log_node_output(
-                "generate_reply",
-                {
-                    "status_code": status_code,
-                    "raw": result.get("text"),
-                    "assistant_reply": reply,
-                    "fallback_used": True,
-                    "state": state.to_context(),
-                },
-            )
-            return reply
-        parsed = parse_json_object(result.get("text"))
-        parsed_reply = str(parsed.get("assistant_reply") or "").strip()
-        fallback_used = not parsed_reply or contains_absolute_position_text(parsed_reply)
-        reply = parsed_reply if not fallback_used else fallback_reply(state)
+    async def generate_reply(self, *, model: str, state: PlateAgentState, changed: bool, scene: str = "") -> str:
+        reply = build_fixed_reply(state, changed=changed, scene=scene)
         log_node_output(
             "generate_reply",
             {
-                "status_code": status_code,
-                "raw": result.get("text"),
+                "source": "fixed_message_template",
+                "scene": scene,
+                "changed": changed,
                 "assistant_reply": reply,
-                "fallback_used": fallback_used,
                 "state": state.to_context(),
             },
         )

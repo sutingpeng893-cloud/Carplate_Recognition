@@ -44,6 +44,11 @@ EASYTURN_ENABLED = os.getenv("EASYTURN_ENABLED", "0").lower() in {"1", "true", "
 EASYTURN_API_URL = os.getenv("EASYTURN_API_URL", "").rstrip("/")
 EASYTURN_ACK_TEXT = os.getenv("EASYTURN_ACK_TEXT", "嗯，我在听，你继续。")
 SESSION_TTL = int(os.getenv("SESSION_TTL", "1800"))
+PLATE_AGENT_TRACE_ENABLED = os.getenv("PLATE_AGENT_TRACE_ENABLED", "1").lower() not in {"0", "false", "off", "no"}
+PLATE_AGENT_TRACE_DIR = Path(os.getenv("PLATE_AGENT_TRACE_DIR", str(APP_DIR / "logs" / "plate_agent_sessions")))
+PLATE_AGENT_LOG_DETAIL_MAX_CHARS = int(os.getenv("PLATE_AGENT_LOG_DETAIL_MAX_CHARS", "300"))
+if PLATE_AGENT_TRACE_ENABLED:
+    PLATE_AGENT_TRACE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def resolved_provider() -> str:

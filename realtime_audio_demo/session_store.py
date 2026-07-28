@@ -18,6 +18,7 @@ class ChatSession:
     history: list[dict[str, Any]] = field(default_factory=list)
     plate_state: PlateAgentState = field(default_factory=PlateAgentState)
     plate_audio_turns: list[bytes] = field(default_factory=list)
+    plate_turn_summaries: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     last_access: float = field(default_factory=time.time)
 
@@ -109,6 +110,34 @@ async def get_plate_audio_turns(session_id: str) -> list[bytes]:
         return list(session.plate_audio_turns)
 
 
+async def get_plate_turn_summaries(session_id: str, *, limit: int = 6) -> list[str]:
+    async with _lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            session = ChatSession(session_id=session_id)
+            _sessions[session_id] = session
+            logger.info("session %s created", session_id)
+        session.last_access = time.time()
+        summaries = list(session.plate_turn_summaries)
+        return summaries[-limit:] if limit > 0 else summaries
+
+
+async def append_plate_turn_summary(session_id: str, summary: str, *, max_summaries: int = 12) -> None:
+    text = str(summary or "").strip()
+    if not text:
+        return
+    async with _lock:
+        session = _sessions.get(session_id)
+        if session is None:
+            session = ChatSession(session_id=session_id)
+            _sessions[session_id] = session
+            logger.info("session %s created", session_id)
+        session.plate_turn_summaries.append(text[:1200])
+        if max_summaries > 0 and len(session.plate_turn_summaries) > max_summaries:
+            session.plate_turn_summaries = session.plate_turn_summaries[-max_summaries:]
+        session.last_access = time.time()
+
+
 async def append_plate_audio_turn(session_id: str, wav_bytes: bytes) -> None:
     async with _lock:
         session = _sessions.get(session_id)
@@ -170,6 +199,7 @@ async def reset_session_state(session_id: str) -> None:
         session.history = []
         session.plate_state = PlateAgentState()
         session.plate_audio_turns = []
+        session.plate_turn_summaries = []
         session.last_access = time.time()
 
 

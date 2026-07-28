@@ -130,6 +130,7 @@ class PlateAgentState:
     final_car_plate: str = ""
     assistant_reply: str = ""
     ack_sent: bool = False
+    turn_summaries: list[str] = field(default_factory=list)
 
     @property
     def has_car_plate(self) -> bool:
@@ -151,6 +152,7 @@ class PlateAgentState:
             "final_car_plate": self.final_car_plate,
             "assistant_reply": self.assistant_reply,
             "ack_sent": self.ack_sent,
+            "turn_summaries": list(self.turn_summaries),
         }
 
 

@@ -10,13 +10,17 @@ from realtime_audio_demo.services.plate_agent_confirmation import (
     apply_confirmation_actions,
     confirmation_actions_from_confusions,
 )
-from realtime_audio_demo.services.plate_agent_constants import EDIT_UNCLEAR_REPLY, NO_PLATE_REPLY
 from realtime_audio_demo.services.plate_agent_logging import (
     CURRENT_SESSION_ID,
     CURRENT_TURN_BEFORE_STATE,
     log_agent_line,
     log_node_output,
     logger,
+)
+from realtime_audio_demo.services.plate_agent_messages import (
+    EDIT_UNCLEAR_REPLY,
+    NO_PLATE_REPLY,
+    build_confirmed_reply,
 )
 from realtime_audio_demo.services.plate_agent_nodes import PlateAgentNodesMixin
 from realtime_audio_demo.services.plate_agent_parsing import elapsed_ms, unique_positions
@@ -49,6 +53,7 @@ class PlateAgentService(PlateAgentNodesMixin):
         state: PlateAgentState,
         session_id: str = "",
         on_ack: Any = None,
+        turn_summaries: list[str] | None = None,
     ) -> PlateAgentResult:
         """处理一轮用户音频。
 
@@ -61,6 +66,8 @@ class PlateAgentService(PlateAgentNodesMixin):
 
         # 每轮都克隆一份状态在 working 上处理，避免中途失败时污染调用方传入的旧状态。
         working = clone_state(state)
+        if turn_summaries is not None:
+            working.turn_summaries = list(turn_summaries)[-6:]
         before_state = working.to_context()
 
         # 记录 session id 和本轮处理前状态，后续所有节点日志都会自动带上这些上下文。
@@ -187,7 +194,12 @@ class PlateAgentService(PlateAgentNodesMixin):
             )
 
             # 根据当前暂存车牌和待确认列表，生成给用户听到的自然语言回复。
-            assistant_reply = await self.generate_reply(model=model, state=working, changed=True)
+            assistant_reply = await self.generate_reply(
+                model=model,
+                state=working,
+                changed=True,
+                scene="initial_success",
+            )
             working.assistant_reply = assistant_reply
             output = build_output_json(
                 task_status="need_confirmation",
@@ -241,7 +253,7 @@ class PlateAgentService(PlateAgentNodesMixin):
             )
             working.final_car_plate = working.car_plate
             working.ack_sent = False
-            assistant_reply = f"好的，已确认您的车牌号是{working.final_car_plate}。"
+            assistant_reply = build_confirmed_reply(working.final_car_plate)
             working.assistant_reply = assistant_reply
             output = build_output_json(
                 task_status="confirmed",
@@ -288,7 +300,12 @@ class PlateAgentService(PlateAgentNodesMixin):
                     confirmed_positions=review_confirmed_positions,
                 )
                 assistant_reply = (
-                    await self.generate_reply(model=model, state=working, changed=False)
+                    await self.generate_reply(
+                        model=model,
+                        state=working,
+                        changed=False,
+                        scene="partial_confirmation",
+                    )
                     if (edit_result.command and edit_result.command.action == "none") or review_confirmed_positions
                     else reply_with_pending_confirmation(edit_result.error or EDIT_UNCLEAR_REPLY, working)
                 )
@@ -392,7 +409,12 @@ class PlateAgentService(PlateAgentNodesMixin):
             working=working,
             confirmed_positions=unique_positions([*edit_result.changed_positions, *review_confirmed_positions]),
         )
-        assistant_reply = await self.generate_reply(model=model, state=working, changed=True)
+        assistant_reply = await self.generate_reply(
+            model=model,
+            state=working,
+            changed=True,
+            scene="update_success",
+        )
         working.assistant_reply = assistant_reply
         output = build_output_json(
             task_status="need_confirmation",

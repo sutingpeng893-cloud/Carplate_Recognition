@@ -27,6 +27,7 @@ def clone_state(state: PlateAgentState) -> PlateAgentState:
         final_car_plate=state.final_car_plate,
         assistant_reply=state.assistant_reply,
         ack_sent=state.ack_sent,
+        turn_summaries=list(state.turn_summaries),
     )
     if cloned_state.car_plate and not cloned_state.plate_chars:
         refresh_plate_state(

@@ -4,25 +4,11 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
+from realtime_audio_demo.services.plate_agent_messages import ACK_MESSAGES_BY_SCENE
 from realtime_audio_demo.services.plate_agent_types import PlateAgentState
 
 
 ACK_SCHEDULE_SECONDS = (0.0, 1.0, 3.0, 5.0)
-
-ACK_MESSAGES_BY_SCENE = {
-    "initial": (
-        "语音已收到，正在判断是否包含车牌信息。",
-        "正在识别车牌号码内容。",
-        "还在结合车牌规则和发音做确认。",
-        "识别还在处理，请稍等。",
-    ),
-    "update": (
-        "语音已收到，正在判断您是在确认还是修改。",
-        "正在结合当前车牌处理您的这次回复。",
-        "还在复核修改结果和需要确认的位置。",
-        "处理还在继续，请稍等。",
-    ),
-}
 
 
 def ack_scene_for_state(state: PlateAgentState) -> str:

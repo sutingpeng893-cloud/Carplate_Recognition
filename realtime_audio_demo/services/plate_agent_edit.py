@@ -5,6 +5,12 @@ import re
 from typing import Any
 
 from realtime_audio_demo.services.output_filter import extract_json_candidate
+from realtime_audio_demo.services.plate_agent_messages import (
+    EDIT_UNCLEAR_REPLY,
+    build_char_not_found_reply,
+    build_duplicate_char_reply,
+    build_keep_current_plate_reply,
+)
 from realtime_audio_demo.services.plate_agent_types import PlateEditCommand, PlateEditResult
 
 
@@ -34,9 +40,6 @@ SPOKEN_PLATE_CHAR_REPLACEMENTS = {
     "沟儿": "J",
     "圈": "Q",
 }
-EDIT_UNCLEAR_REPLY = "我没有听清您要修改车牌的哪一处，当前仍保留原来的车牌。请您说明要替换、插入或删除哪一位。"
-
-
 def parse_plate_edit_command(text: Any) -> PlateEditCommand:
     commands = parse_plate_edit_commands(text)
     return commands[0] if commands else unknown_edit_command()
@@ -140,7 +143,7 @@ def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> P
             car_plate=plate,
             changed=False,
             command=command,
-            error=f"当前仍保留原来的车牌{plate}，请您确认是否正确。",
+            error=build_keep_current_plate_reply(plate),
         )
     if action == "unknown":
         return PlateEditResult(car_plate=plate, changed=False, command=command, error=EDIT_UNCLEAR_REPLY)
@@ -234,7 +237,7 @@ def apply_plate_edit_commands(current_plate: str, commands: list[PlateEditComman
             command=command,
             changed_positions=[],
             steps=command_steps,
-            error=f"当前仍保留原来的车牌{plate}，请您确认是否正确。",
+            error=build_keep_current_plate_reply(plate),
         )
     return PlateEditResult(
         car_plate=plate,
@@ -250,14 +253,14 @@ def apply_replace_char(plate: str, chars: list[str], command: PlateEditCommand) 
         return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
     indexes = [index for index, char in enumerate(chars) if char == command.old_value]
     if not indexes:
-        return edit_error(plate, command, f"当前车牌里没有{describe_plate_char(command.old_value)}，所以没有修改。当前仍保留原来的车牌。")
+        return edit_error(plate, command, build_char_not_found_reply(command.old_value))
     if command.occurrence == "all":
         changed_positions = [index + 1 for index in indexes]
         for index in indexes:
             chars[index] = command.value
         return edit_success(chars, command, changed_positions=changed_positions)
     if len(indexes) > 1 and command.occurrence not in {"first", "last"}:
-        return edit_error(plate, command, f"当前车牌里有多个{describe_plate_char(command.old_value)}，请您说明要改前面的还是后面的。")
+        return edit_error(plate, command, build_duplicate_char_reply(command.old_value))
     index = indexes[0] if command.occurrence != "last" else indexes[-1]
     chars[index] = command.value
     return edit_success(chars, command, changed_positions=[index + 1])
@@ -405,27 +408,3 @@ def normalize_plate_text(value: Any) -> str:
         return "冀" + plate[1:]
     return plate
 
-
-def describe_plate_char(value: str) -> str:
-    labels = {
-        "赣": "江西的赣",
-        "甘": "甘肃的甘",
-        "津": "天津的津",
-        "京": "北京的京",
-        "桂": "广西的桂",
-        "贵": "贵州的贵",
-        "冀": "河北的冀",
-        "吉": "吉林的吉",
-        "临": "临时车牌的临",
-        "警": "警车的警",
-        "学": "学车的学",
-        "领": "领馆的领",
-        "挂": "挂车的挂",
-    }
-    if value in labels:
-        return labels[value]
-    if value.isdigit():
-        return f"数字 {value}"
-    if re.fullmatch(r"[A-Za-z]", value):
-        return f"字母 {value.upper()}"
-    return value
