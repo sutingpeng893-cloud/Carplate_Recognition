@@ -187,6 +187,26 @@ class PlateEditCommand:
 
 
 @dataclass(slots=True)
+class PlateConfirmationAction:
+    action: str
+    position: int = 0
+    value: str = ""
+    reason: str = ""
+    candidates: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "position": self.position,
+            "value": self.value,
+            "candidates": self.candidates,
+            "reason": self.reason,
+            "raw": self.raw,
+        }
+
+
+@dataclass(slots=True)
 class PlateUpdateReview:
     confirmed_positions: list[int] = field(default_factory=list)
     needs_more_edit: bool = False
