@@ -28,25 +28,42 @@ def build_plate_edit_command_prompt(
     }
     context_json = json.dumps(context, ensure_ascii=False, indent=2)
     return f"""
-任务：根据用户最新音频，把用户的修改意图转换成一个车牌编辑函数调用。
+任务：根据用户最新音频，把用户的纠正意图转换成一个车牌编辑函数调用。
+
+当前任务不是重新识别一个新车牌，而是对当前已经暂存的车牌做最小必要编辑。
+你需要把用户语音里的纠正、插入、删除、确认意图，转换成后端可以执行的编辑命令。
+如果用户一句话里包含多个明确修改，可以输出 actions 列表，后端会按列表顺序执行。
 
 判断步骤：
-1. 用户说了什么：简短复述用户这轮语音里的确认或修改意图。
-2. 应该怎么改：说明要操作当前车牌的哪个位置或哪个字符；如果不需要修改，说明是确认。
-3. 如何输入命令：选择唯一 action，并确定 position、value、old_value、relation、occurrence 中需要的字段。
+1. 用户说了什么：简短复述用户这轮语音里的确认或纠正意图。
+2. 当前车牌怎么定位：根据 current_car_plate / plate_chars 找到用户指向的是哪个位置或哪个已有字符。
+3. 字符怎么标准化：把用户说的报号发音转换成车牌字符，例如洞=0、幺=1、拐=7、圈=Q、勾=J。
+4. 应该怎么改：说明是替换某一位、替换某个字符、插入、删除，还是只是在确认。
+5. 修改结果预演：在心里把编辑动作应用到 current_car_plate 上，确认动作能得到用户想要的变化。
+6. 如何输入命令：选择单个 action 或 actions 列表，并确定 position、value、old_value、relation、occurrence 中需要的字段。
+
+编辑前检查闭环：
+1. 先逐位读取 current_car_plate，不要跳过当前已有字符。
+2. 再从用户语音里找纠正关键词：不是、改成、换成、前面、后面、第几位、最后一位、加、删、不要、对、没错。
+3. 如果用户说的是“这个、那个、前面的、后面的”，必须结合 need_confirm_chars、previous_assistant_reply 和 current_car_plate 判断指向。
+4. 如果用户说的是读音，必须先转换成标准车牌字符，再决定 value / old_value。
+5. 如果能确定修改动作，先预演一次修改后的车牌；如果预演结果明显不符合用户语义，就不要输出这个动作。
+6. 如果一句话里包含多个修改，且每个修改都明确可执行，可以按用户语义顺序输出 actions 列表。
+7. 如果一句话里包含多个修改但只有一部分明确，只输出明确的动作；不明确的动作不要猜。
+8. 如果没有办法形成确定、可执行的编辑命令，输出 none，不要猜。
 
 重要原则：
-1. 只判断用户这句话应该调用哪一个编辑函数，并输出这个函数需要的参数。
-2. 只能选择一个 action；如果已经有 executed_edit_steps，本次只输出尚未处理的下一个单一动作。
-3. action 必须只使用英文枚举：replace_position、replace_char、insert_position、delete_position、none。
-4. relation 必须只使用 before 或 after；occurrence 必须只使用 first、last、all 或空字符串。
-5. position 使用 1 开始计数，必须对应 current_car_plate / plate_chars 里的当前位置。
-6. value 和 old_value 只能是单个车牌字符：省份简称、英文字母、数字、警、临、学、领、挂。
-7. 需要处理报号发音：洞=0，幺=1，是=4，陆=6，拐=7，吸=C，勾/沟儿=J，圈=Q。
-8. 用户只是确认某个待确认字符正确，例如“天津的津是对的”“那个 R 没错”，输出 none，不要输出替换动作。
-9. 如果用户修改意图已经被 executed_edit_steps 覆盖完，输出 none。
-10. 必须先按“用户说了什么 / 应该怎么改 / 如何输入命令”输出简短判断，再输出一个完整 JSON 对象。
-11. 后端会从输出尾部提取最后一个完整 JSON 对象作为唯一解析依据；JSON 对象必须只包含一个 action 及其参数。
+1. current_car_plate 是唯一可编辑对象；必须先把用户语音和当前车牌对齐，不要凭空生成新的完整车牌。
+2. 优先选择最小编辑；一个修改用单个 action，多个明确修改用 actions 列表；如果 executed_edit_steps 已经覆盖本轮意图，本次输出 none。
+3. action 只能使用 replace_position、replace_char、insert_position、delete_position、none；relation 只能是 before/after；occurrence 只能是 first/last/all 或空字符串。
+4. position 使用 1 开始计数，必须对应 current_car_plate / plate_chars 里的当前位置；最后一位、倒数第一位等说法要换算成正向位置。
+5. 根据用户表达选择函数：第几位改成用 replace_position；不是 X 是 Y、X 改成 Y 用 replace_char；加或插入用 insert_position；删掉或不要用 delete_position。
+6. 用户只是在确认当前车牌或待确认字符正确时输出 none；如果无法形成确定、可执行的编辑命令，也输出 none，不要猜。
+7. replace_char 的 old_value 如果在当前车牌里出现多次，必须根据用户说的前面、后面、全部设置 occurrence；无法确定时输出 none。
+8. value 和 old_value 只能是单个车牌字符：省份简称、英文字母、数字、警、临、学、领、挂。
+9. 必须处理报号发音：零/洞=0，幺/么=1，二/两=2，是=4，陆=6，拐=7，吸=C，勾/沟儿=J，圈=Q。
+10. actions 列表最多输出 3 个动作；列表中不要混入 none；每个动作都必须能独立执行。
+11. actions 列表会按顺序执行；后续动作的 position 必须按前一个动作执行后的车牌重新计算。
 
 可调用编辑函数：
 
@@ -82,10 +99,26 @@ def none()
 输出：{{"action":"none"}}
 
 输出格式：
+必须先按“用户说了什么 / 当前车牌怎么定位 / 字符怎么标准化 / 应该怎么改 / 修改结果预演 / 如何输入命令”输出简短判断。
+最后必须输出一个完整 JSON 对象；后端会从输出尾部提取最后一个完整 JSON 对象作为唯一解析依据。
+单个修改可以输出单个 action 对象；多个明确修改必须输出 actions 列表对象。
+
 用户说了什么：用户是在纠正第 3 位。
+当前车牌怎么定位：当前车牌第 3 位是 2。
+字符怎么标准化：用户说的 R 是字母 R。
 应该怎么改：把当前车牌第 3 位替换为字母 R。
+修改结果预演：执行后只有第 3 位从 2 变成 R，其它字符不变。
 如何输入命令：使用 replace_position，position=3，value=R。
 {{"action":"replace_position","position":3,"value":"R"}}
+
+多个修改输出示例：
+用户说了什么：用户要求把第 3 位改成 R，并在最后一位后面加临。
+当前车牌怎么定位：当前车牌第 3 位是 2，最后一位位置是 {len(plate)}。
+字符怎么标准化：R 是字母 R，临是特殊尾字临。
+应该怎么改：先替换第 3 位，再在当前最后一位后面插入临。
+修改结果预演：两个动作按顺序执行，前一个动作改变第 3 位，后一个动作在末尾追加临。
+如何输入命令：使用 actions 列表，按 replace_position、insert_position 的顺序执行。
+{{"actions":[{{"action":"replace_position","position":3,"value":"R"}},{{"action":"insert_position","position":{len(plate)},"value":"临","relation":"after"}}]}}
 
 读取下面的当前车牌状态后，结合用户音频完成判断。当前车牌状态是本轮唯一动态上下文：
 {context_json}
@@ -98,7 +131,7 @@ def build_plate_update_review_prompt(context: dict[str, Any]) -> str:
 
 你需要根据同一段用户语音和当前上下文判断：
 1. 用户这轮到底是在确认哪些位、修改哪些位，还是还有未处理的修改意图。
-2. 已执行编辑步骤是否已经覆盖用户意图。
+2. 已执行的 command / commands 是否已经覆盖用户意图。
 3. after_plate 是否是一个合理的中间或最终结果。
 4. 用户本轮明确确认过的车牌位置有哪些，需要加入 confirmed_positions。
 
@@ -107,11 +140,11 @@ def build_plate_update_review_prompt(context: dict[str, Any]) -> str:
 
 判断规则：
 1. 如果用户明确说某个待确认字符是对的，例如“天津的津对”“那个 R 没错”，把对应 position 放进 confirmed_positions。
-2. 如果用户明确把某一位改成新字符，且本轮编辑正确执行了这个修改，也把该 position 放进 confirmed_positions。
+2. 如果用户明确把某一位改成新字符，且本轮 command / commands 正确执行了这个修改，也把该 position 放进 confirmed_positions。
 3. 如果修改后的字符已经不是易混淆字符，后端会自动从 need_confirm_chars 删除；你只需要把用户明确确认的位置输出出来。
 4. 如果用户还表达了另一个未处理的修改动作，needs_more_edit=true。
 5. 如果当前编辑动作和用户语音明显不一致，valid_result=false。
-6. 如果编辑已经覆盖用户意图，needs_more_edit=false。
+6. 如果本轮一个或多个编辑动作已经覆盖用户意图，needs_more_edit=false。
 7. 不要输出推理过程，不要输出自然语言，只输出 JSON。
 
 输出 JSON 字段：

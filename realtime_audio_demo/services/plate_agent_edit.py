@@ -38,7 +38,47 @@ EDIT_UNCLEAR_REPLY = "我没有听清您要修改车牌的哪一处，当前仍�
 
 
 def parse_plate_edit_command(text: Any) -> PlateEditCommand:
-    data = parse_json_object(text)
+    commands = parse_plate_edit_commands(text)
+    return commands[0] if commands else unknown_edit_command()
+
+
+def parse_plate_edit_commands(text: Any) -> list[PlateEditCommand]:
+    value = parse_json_value(text)
+    command_items = extract_command_items(value)
+    commands = [parse_plate_edit_command_data(item) for item in command_items if isinstance(item, dict)]
+    return commands or [unknown_edit_command()]
+
+
+def extract_command_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+
+    for key in ("actions", "commands", "edits"):
+        items = value.get(key)
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+
+    tool_calls = value.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        commands: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            function_data = tool_call.get("function") if isinstance(tool_call, dict) else None
+            if not isinstance(function_data, dict):
+                continue
+            arguments = parse_arguments_object(function_data.get("arguments"))
+            if isinstance(arguments, dict):
+                commands.append({**arguments, "action": value.get("action") or function_data.get("name") or arguments.get("action")})
+            else:
+                commands.append({"action": value.get("action") or function_data.get("name")})
+        if commands:
+            return commands
+
+    return [value]
+
+
+def parse_plate_edit_command_data(data: dict[str, Any]) -> PlateEditCommand:
     tool_calls = data.get("tool_calls")
     if isinstance(tool_calls, list) and tool_calls:
         first_tool = tool_calls[0]
@@ -88,6 +128,10 @@ def parse_plate_edit_command(text: Any) -> PlateEditCommand:
     )
 
 
+def unknown_edit_command() -> PlateEditCommand:
+    return PlateEditCommand(action="unknown", raw={})
+
+
 def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> PlateEditResult:
     plate = normalize_plate_text(current_plate)
     action = command.action
@@ -129,6 +173,78 @@ def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> P
     return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
 
 
+def apply_plate_edit_commands(current_plate: str, commands: list[PlateEditCommand]) -> PlateEditResult:
+    plate = normalize_plate_text(current_plate)
+    normalized_commands = commands or [unknown_edit_command()]
+    if len(normalized_commands) == 1:
+        return apply_plate_edit_command(plate, normalized_commands[0])
+
+    changed = False
+    changed_positions: list[int] = []
+    command_steps: list[dict[str, Any]] = []
+    primary_command: PlateEditCommand | None = None
+
+    for index, command in enumerate(normalized_commands, start=1):
+        if command.action == "none":
+            command_steps.append(
+                {
+                    "batch_index": index,
+                    "input_plate": plate,
+                    "command": command.to_dict(),
+                    "output_plate": plate,
+                    "changed": False,
+                    "error": "",
+                }
+            )
+            continue
+
+        result = apply_plate_edit_command(plate, command)
+        if primary_command is None:
+            primary_command = command
+        command_steps.append(
+            {
+                "batch_index": index,
+                "input_plate": plate,
+                "command": command.to_dict(),
+                "output_plate": result.car_plate,
+                "changed": result.changed,
+                "changed_positions": result.changed_positions,
+                "error": result.error,
+            }
+        )
+        if not result.changed:
+            return PlateEditResult(
+                car_plate=plate,
+                changed=changed,
+                command=command,
+                changed_positions=unique_ints(changed_positions),
+                steps=command_steps,
+                error=result.error or EDIT_UNCLEAR_REPLY,
+                raw=result.raw,
+            )
+        plate = result.car_plate
+        changed = True
+        changed_positions.extend(result.changed_positions)
+
+    if not changed:
+        command = normalized_commands[0]
+        return PlateEditResult(
+            car_plate=plate,
+            changed=False,
+            command=command,
+            changed_positions=[],
+            steps=command_steps,
+            error=f"当前仍保留原来的车牌{plate}，请您确认是否正确。",
+        )
+    return PlateEditResult(
+        car_plate=plate,
+        changed=True,
+        command=primary_command or normalized_commands[0],
+        changed_positions=unique_ints(changed_positions),
+        steps=command_steps,
+    )
+
+
 def apply_replace_char(plate: str, chars: list[str], command: PlateEditCommand) -> PlateEditResult:
     if not command.old_value or not command.value:
         return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
@@ -166,14 +282,19 @@ def edit_error(plate: str, command: PlateEditCommand, error: str) -> PlateEditRe
 
 
 def parse_json_object(text: Any) -> dict[str, Any]:
+    value = parse_json_value(text)
+    return value if isinstance(value, dict) else {}
+
+
+def parse_json_value(text: Any) -> Any:
     raw = str(text or "").strip()
     if not raw:
-        return {}
+        return None
     try:
-        value = json.loads(extract_json_candidate(raw, prefer_object=True))
+        value = json.loads(extract_json_candidate(raw))
     except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
+        return None
+    return value
 
 
 def parse_arguments_object(value: Any) -> dict[str, Any] | None:
@@ -257,6 +378,17 @@ def parse_chinese_position(value: str) -> int:
 
 def valid_existing_position(position: int, chars: list[str]) -> bool:
     return 1 <= position <= len(chars)
+
+
+def unique_ints(values: list[int]) -> list[int]:
+    result: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def clean_plate_text(value: Any) -> str:

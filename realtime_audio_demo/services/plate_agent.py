@@ -13,9 +13,9 @@ from realtime_audio_demo.services.interfaces import ChatModel
 from realtime_audio_demo.services.output_filter import extract_json_candidate
 from realtime_audio_demo.services.plate_agent_ack import ack_schedule_for_state
 from realtime_audio_demo.services.plate_agent_edit import (
-    apply_plate_edit_command,
+    apply_plate_edit_commands,
     normalize_spoken_plate_chars,
-    parse_plate_edit_command,
+    parse_plate_edit_commands,
     parse_positive_int,
 )
 from realtime_audio_demo.services.plate_agent_prompts import (
@@ -593,7 +593,7 @@ class PlateAgentService:
             model=model,
             wav_bytes=wav_bytes,
             prompt=CAR_PLATE_EXTRACTION_PROMPT,
-            max_tokens=512,
+            max_tokens=1024,
         )
         summarized_raw = extract_final_plate_from_text(extraction_result)
         summarized_plate = sanitize_extracted_plate_text(summarized_raw)
@@ -761,9 +761,10 @@ class PlateAgentService:
                     current_plate=tentative_plate,
                     edit_steps=steps,
                 ),
-                max_tokens=256,
+                max_tokens=1024,
             )
-            command = parse_plate_edit_command(command_result)
+            commands = parse_plate_edit_commands(command_result)
+            command = commands[0]
             log_node_output(
                 "update_car_plate.react_action",
                 {
@@ -773,9 +774,10 @@ class PlateAgentService:
                     "tentative_state": tentative_state.to_context(),
                     "input_plate": tentative_plate,
                     "command": command.to_dict(),
+                    "commands": [item.to_dict() for item in commands],
                 },
             )
-            edit_result = apply_plate_edit_command(tentative_plate, command)
+            edit_result = apply_plate_edit_commands(tentative_plate, commands)
             edit_result.raw = command_result
             log_node_output(
                 "update_car_plate.edit_result",
@@ -783,6 +785,7 @@ class PlateAgentService:
                     "step": step_index,
                     "input_plate": tentative_plate,
                     "command": command.to_dict(),
+                    "commands": [item.to_dict() for item in commands],
                     "edit_result": edit_result.to_dict(),
                 },
             )
@@ -800,6 +803,7 @@ class PlateAgentService:
                 "input_plate": tentative_plate,
                 "raw": command_result,
                 "command": command.to_dict(),
+                "commands": [item.to_dict() for item in commands],
                 "edit_result": edit_result.to_dict(),
                 "review": review.to_dict(),
             }
@@ -811,6 +815,7 @@ class PlateAgentService:
                     "previous_state": state.to_context(),
                     "tentative_state": tentative_state.to_context(),
                     "command": command.to_dict(),
+                    "commands": [item.to_dict() for item in commands],
                     "edit_result": edit_result.to_dict(),
                     "review": review.to_dict(),
                 },
@@ -855,7 +860,7 @@ class PlateAgentService:
             if not review.needs_more_edit:
                 return edit_result
 
-            if command.action in {"none", "unknown"} or not edit_result.changed:
+            if all(item.action in {"none", "unknown"} for item in commands) or not edit_result.changed:
                 edit_result.error = edit_result.error or EDIT_UNCLEAR_REPLY
                 return edit_result
 
@@ -880,6 +885,7 @@ class PlateAgentService:
             "before_plate": before_plate,
             "after_plate": after_plate,
             "command": edit_result.command.to_dict() if edit_result.command else None,
+            "commands": extract_batch_commands(edit_result),
             "changed": edit_result.changed,
             "changed_positions": edit_result.changed_positions,
             "existing_steps": steps,
@@ -1350,6 +1356,17 @@ def unique_positions(values: list[int]) -> list[int]:
         seen.add(position)
         positions.append(position)
     return positions
+
+
+def extract_batch_commands(edit_result: PlateEditResult) -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    for step in edit_result.steps:
+        command = step.get("command") if isinstance(step, dict) else None
+        if isinstance(command, dict):
+            commands.append(command)
+    if commands:
+        return commands
+    return [edit_result.command.to_dict()] if edit_result.command else []
 
 
 def parse_yes_no(text: str, *, default: bool) -> bool:
