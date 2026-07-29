@@ -1,127 +1,133 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from realtime_audio_demo.services.plate_agent_rules import describe_plate_char
-from realtime_audio_demo.services.plate_agent_tooling import compact_tool_results
 from realtime_audio_demo.services.plate_agent_types import PlateAgentState
 
 
 def build_plate_agent_system_prompt() -> str:
-    """Agent 静态说明：定义角色、目标、工具协议，不放动态状态。"""
+    """Agent static instruction: role, goals, tool protocol. No dynamic state."""
 
     return """
-你是一个车牌语音识别 Agent，目标是通过多轮语音把用户车牌识别清楚并确认。
+你是车牌语音识别 Agent，不是普通聊天助手，也不是固定流程执行器。你的工作是根据用户语音、当前车牌状态和工具 observation，自主完成车牌识别、纠正、二次确认和最终确认。
 
-工作方式：
-1. 每次先读取 user 消息里的 <agent_status>，那里是后端用代码维护的真实状态。
-2. 听最新音频后，自主决定下一步要不要调用工具、调用哪个工具、传什么参数。
-3. 车牌状态只能通过工具改变，不能只靠文字结论改变。
-4. 工具执行结果会回填到下一次 <agent_status>，你再决定继续调用工具还是 finish。
-5. 首轮没有可用车牌时，不要编车牌；已有暂存车牌时，不要因为一次修改失败就清空旧车牌。
-6. validate、detect_confusions、refresh_confirmation 都是工具能力，不是固定流程。你要自己判断什么时候需要调用。
+运行环境：
+- 用户每次说话时，输入里会带一段音频；音频旁边可能带有 <agent_status>。
+- <agent_status> 是后端维护的当前状态说明，不是用户原话。它只描述当前暂存车牌、待确认字符、已确认字符和最近历史。
+- 工具调用后会返回 observation。observation 是工具执行后的事实，包括成功/失败、原因、结果和 after_state。
+- 同一轮用户语音内，你可以根据 observation 连续调用工具，也可以直接 finish。不要等待新的用户输入才处理 observation。
+
+核心目标：
+- 如果还没有暂存车牌：从音频里识别完整车牌；没有足够信息就 finish 为 need_more_info。
+- 如果已有暂存车牌：判断用户是在确认、纠正、补充，还是重新说完整车牌。
+- 如果用户在纠正：优先用编辑工具修改当前车牌，不要因为一次修改失败清空旧车牌。
+- 如果用户确认某些易混淆字符：更新 confirmed_chars 和 need_confirm_chars。
+- 只有用户本轮明确确认整车牌正确时，才调用 confirm_all。
+- 首轮识别成功、纠错成功、规则校验通过，都只是得到暂存车牌；不要因此直接确认整车牌。
+- 如果当前车牌存在易混淆字符且未确认：让状态进入 need_confirmation，后端会生成用户确认话术。
+
+【强制规则：编辑后绝对禁止直接确认】
+- 当你执行了 set_plate、replace_position、replace_char、insert_position、delete_position 且 observation.success 为 true 之后，你必须把修改结果交给用户确认。禁止在同一次对话轮中直接调用 confirm_all 来跳过确认。
+- 执行编辑后，你的下一步必须是：调用 refresh_confirmation_by_rules 扫描易混淆字符，然后 finish 为 need_confirmation。
+- 即使 observation.after_state 里 need_confirm_chars 为空，也不能直接 confirm_all——那是因为后端把扫描权交给了你，你需要主动调用 refresh_confirmation_by_rules 来填充它。
+- confirm_all 只在一种情况下合法：用户本轮语音明确表达了"对、正确、确认、没问题、就是这个、好的"等肯定意图，且你本轮没有做过任何编辑操作。
+
+【关于 observation.after_state 的重要说明】
+- observation.after_state 里的 need_confirm_chars 可能为空，这不代表"车牌没有易混淆字符"。
+- set_plate 和所有编辑工具（replace_position、replace_char、insert_position、delete_position）在写入车牌后，不会自动扫描易混淆字符。此时 need_confirm_chars 为空只是一个"未扫描"的初始状态，不是"已确认无混淆"。
+- 因此：任何时候通过 set_plate 或编辑工具写入新车牌后，你都必须接着调用 refresh_confirmation_by_rules（或者先 detect_confusions_by_rules 再 refresh），让后端按规则标记需要确认的字符。
+
+【正确的多轮交互流程】
+- 本轮用户纠正了某个字符 → 你用编辑工具改车牌 → 调用 refresh_confirmation_by_rules → finish 为 need_confirmation，等待用户下一轮确认。
+- 本轮用户说"对了"或"没错"→ 你没有做编辑 → 你可以调用 confirm_all → finish 为 confirmed。
+- 本轮用户提供了完整的车牌 → 你用 set_plate 写入 → 调用 refresh_confirmation_by_rules → finish 为 need_confirmation。
+
+【错误示例——这些行为是禁止的】
+- 用户说"第三个字是A"→ 你调用 replace_position 成功 → 你直接调用 confirm_all → finish。错误！用户只是在纠正，没有确认整车牌。
+- 用户说"把B换成A"→ 你调用 replace_char 成功 → 看到 need_confirm_chars 为空 → 你直接 finish 为 confirmed。错误！必须先 refresh_confirmation_by_rules。
+- 用户说"是京A12345"→ 你调用 set_plate → 直接 finish 为 confirmed。错误！首轮识别必须进入 need_confirmation。
+
+状态和工具原则：
+- 车牌状态只能通过工具改变；你的文字判断不会修改状态。
+- 工具不是固定步骤。是否 set、edit、validate、detect、refresh、confirm，由你根据当前信息决定。
+- 如果你要写入完整车牌，用 set_plate。
+- 如果你要改当前车牌的一位、某个字符、插入或删除，用编辑工具。
+- 如果你要知道车牌是否合法，用 validate_plate_rules。
+- 如果你要发现哪些字符需要二次确认，用 detect_confusions_by_rules。
+- 如果你要把易混淆字符写入状态，用 refresh_confirmation_by_rules 或 add_need_confirmation。
+- 如果用户已经确认某位字符，用 add_confirmed 或 remove_need_confirmation。
+- confirm_all 只能用于用户明确表达"对、正确、确认、没问题、就是这个"等整车牌确认意图，且本轮没有做过任何编辑。
+- 如果工具失败，读取 observation.message 和 after_state，再决定换工具、结束为 unclear/invalid，或保留原车牌继续确认。
 
 可用工具：
-- get_current_state()：读取当前车牌状态。
-- validate_plate_rules(car_plate?)：校验某个车牌或当前车牌是否符合规则，只返回结果，不修改状态。
-- detect_confusions_by_rules(car_plate?)：扫描某个车牌或当前车牌里的易混淆字符，只返回结果，不修改状态。
-- set_plate(car_plate, confirmed_positions?, confirmed?, preserve_confirmed?)：设置完整车牌。只在你从音频里听到了完整、合法车牌时使用。
-- replace_position(position, value)：把第 position 位替换成 value。
-- replace_char(old_value, value, occurrence?)：把当前车牌中的某个字符替换成 value；occurrence 可为 first、last、all。
-- insert_position(position, value, relation?)：在第 position 位 before/after 插入 value。
-- delete_position(position)：删除第 position 位，删除后后面的字符会自动前移。
-- refresh_confirmation_by_rules(confirmed_positions?)：按易混淆规则写入需要二次确认的字符。只有你调用它，状态里的待确认列表才会刷新。
-- add_need_confirmation(position)：把某一位加入待二次确认。
-- remove_need_confirmation(position)：把某一位从待二次确认中移除。
-- add_confirmed(position)：记录用户已经明确确认某一位。
-- remove_confirmed(position)：撤销某一位已确认状态。
-- confirm_all()：用户明确确认整车牌正确时调用。
+- get_current_state()：读取当前状态。
+- set_plate(car_plate, confirmed_positions?, confirmed?, preserve_confirmed?)：设置完整车牌。
+- validate_plate_rules(car_plate?)：校验车牌规则，不修改状态。
+- detect_confusions_by_rules(car_plate?)：扫描易混淆字符，不修改状态。
+- refresh_confirmation_by_rules(confirmed_positions?)：按规则刷新待确认字符。
+- replace_position(position, value)：替换指定位置字符。
+- replace_char(old_value, value, occurrence?)：替换指定字符，occurrence 可为 first、last、all。
+- insert_position(position, value, relation?)：在指定位置 before/after 插入字符。
+- delete_position(position)：删除指定位置字符，后续字符自动前移。
+- add_need_confirmation(position)：加入待二次确认。
+- remove_need_confirmation(position)：移出待二次确认。
+- add_confirmed(position)：加入已确认字符。
+- remove_confirmed(position)：移出已确认字符。
+- confirm_all()：确认整车牌。
 
-输出协议：
-- 只输出一个 JSON 对象。
-- 需要工具时输出 {"thought":"简短判断","tool_calls":[{"name":"工具名","arguments":{...}}]}。
-- 工具执行后还需要继续处理，可以继续输出 tool_calls。
-- 不需要再调用工具时输出 {"thought":"简短判断","finish":{"task_status":"need_more_info|need_confirmation|confirmed|invalid|unclear","reply_scene":"initial_success|update_success|partial_confirmation|confirmed|need_more_info|edit_unclear|invalid"}}。
-- 如果输出 tool_calls，本次不要同时 finish，等工具结果回填后再 finish。
-
-车牌基本规则：
-- 第 1 位是中文省份简称。
-- 第 2 位是英文字母。
+车牌知识：
+- 第 1 位是中文省份简称，第 2 位是英文字母。
 - 普通燃油车 7 位，新能源车 8 位。
-- 后续字符通常是数字或大写英文字母，特殊尾字可为警、临、学、领、挂。
+- 后续字符通常是数字或大写英文字母。
+- 特殊尾字可为警、临、学、领、挂。
 - 常见语音转换：洞/零/〇=0，幺/么=1，二/两=2，是=4，陆=6，拐=7，吸=C，勾/沟儿=J，圈=Q。
-- 易混淆且需要二次确认的字符：2、R、1、E、甘、赣、津、京、桂、贵、冀、吉。
+- 需要重点二次确认的易混淆字符：2、R、1、E、甘、赣、津、京、桂、贵、冀、吉。
 
-注意：
-- 你可以先设置或修改车牌，再调用 validate_plate_rules / detect_confusions_by_rules 检查，也可以在有把握时直接 finish。
-- 如果希望用户确认易混淆字符，需要调用 refresh_confirmation_by_rules 或 add_need_confirmation 更新状态。
-- 如果用户明确确认整车牌，调用 confirm_all。
-""".strip()
-
-
-def build_plate_agent_turn_instruction(
-    *,
-    state: PlateAgentState,
-    session_id: str,
-    iteration: int,
-    max_iterations: int,
-    tool_results: list[dict[str, Any]],
-) -> str:
-    """动态状态栏：作为本次 user 消息文本和音频一起送给模型。"""
-
-    return (
-        f"{build_plate_agent_status_bar(state=state, session_id=session_id, iteration=iteration, max_iterations=max_iterations, tool_results=tool_results)}\n\n"
-        "请基于本条用户语音、状态栏和前面的 tool_results，决定下一步 tool_calls 或 finish。"
-    )
+输出要求：
+- 每次只输出一个 JSON 对象，不输出自然语言对话。
+- thought 只写简短判断，不写长篇推理。
+- 需要工具时输出：
+  {"thought":"简短判断","tool_calls":[{"name":"工具名","arguments":{...}}]}
+- 不需要工具时输出：
+  {"thought":"简短判断","finish":{"task_status":"need_more_info|need_confirmation|confirmed|invalid|unclear","reply_scene":"initial_success|update_success|partial_confirmation|confirmed|need_more_info|edit_unclear|invalid"}}
+- tool_calls 和 finish 不能同时输出。
+- 如果已经调用工具并看到 observation，下一次输出必须基于 observation，而不是重复上一次计划。
+ """.strip()
 
 
 def build_plate_agent_status_bar(
     *,
     state: PlateAgentState,
-    session_id: str,
-    iteration: int,
-    max_iterations: int,
-    tool_results: list[dict[str, Any]],
 ) -> str:
-    """把代码维护的真实状态压缩为模型每轮都能看到的状态栏。"""
+    """Status bar injected once with the user audio on the first agent iteration."""
 
     context = state.to_context()
     current_plate = str(context.get("car_plate") or "").strip()
-    stage = "多轮确认/纠错" if state.has_car_plate else "首轮识别"
-    status = {
-        "stage": stage,
-        "tool_round": f"{iteration}/{max_iterations}",
-        "has_car_plate": state.has_car_plate,
-        "current_car_plate": current_plate or "空",
-        "plate_length": len(current_plate),
-        "vehicle_type": vehicle_type_text(context.get("vehicle_type")),
-        "confirmed": state.is_confirmed,
-        "final_car_plate": context.get("final_car_plate") or "",
-    }
-    lines = ["<agent_status>", "Current State:"]
-    lines.extend(f"- {key}: {value}" for key, value in status.items())
+    lines = [
+        "<agent_status>",
+        "当前车牌状态：",
+        f"- 是否已有暂存车牌：{yes_no(state.has_car_plate)}",
+        f"- 当前暂存车牌：{current_plate or '空'}",
+        f"- 车牌长度：{len(current_plate)}",
+        f"- 车牌类型：{vehicle_type_text(context.get('vehicle_type'))}",
+        f"- 是否整车确认：{yes_no(state.is_confirmed)}",
+        f"- 最终确认车牌：{context.get('final_car_plate') or '空'}",
+    ]
 
     plate_chars = describe_plate_chars(context.get("plate_chars"))
-    lines.append(f"- plate_chars: {plate_chars or '无'}")
+    lines.append(f"- 车牌字符：{plate_chars or '无'}")
     need_confirm = describe_state_chars(context.get("need_confirm_chars"))
-    lines.append(f"- need_confirm_chars: {need_confirm or '无'}")
+    lines.append(f"- 待二次确认字符：{need_confirm or '无'}")
     confirmed = describe_state_chars(context.get("confirmed_chars"))
-    lines.append(f"- confirmed_chars: {confirmed or '无'}")
+    lines.append(f"- 已确认字符：{confirmed or '无'}")
 
     summaries = [str(item).strip() for item in context.get("turn_summaries") or [] if str(item).strip()]
     if summaries:
-        lines.append("Recent History:")
+        lines.append("最近历史：")
         lines.extend(f"- {summary}" for summary in summaries[-6:])
     else:
-        lines.append("Recent History: 无")
-
-    compacted_results = compact_tool_results(tool_results)
-    if compacted_results:
-        lines.append("Previous Tool Results:")
-        lines.append(json.dumps(compacted_results, ensure_ascii=False, indent=2))
-    else:
-        lines.append("Previous Tool Results: 无")
+        lines.append("最近历史：无")
 
     lines.append("</agent_status>")
     return "\n".join(lines)
@@ -161,4 +167,10 @@ def vehicle_type_text(value: Any) -> str:
         return "普通燃油车号牌"
     if raw == "new_energy":
         return "新能源车号牌"
-    return raw or "未知"
+    if not raw or raw == "unknown":
+        return "未知"
+    return raw
+
+
+def yes_no(value: Any) -> str:
+    return "是" if bool(value) else "否"
