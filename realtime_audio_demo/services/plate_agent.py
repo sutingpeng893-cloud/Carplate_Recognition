@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
-from realtime_audio_demo.config import QWEN_MODEL
+from realtime_audio_demo.config import PLATE_REPLY_INCLUDE_CONFIRMATION, QWEN_MODEL
 from realtime_audio_demo.services.interfaces import ChatModel
 from realtime_audio_demo.services.plate_agent_ack import ack_schedule_for_state
+from realtime_audio_demo.services.plate_agent_confirmation import apply_confirmation_actions
 from realtime_audio_demo.services.plate_agent_logging import (
     CURRENT_SESSION_ID,
     CURRENT_TURN_BEFORE_STATE,
@@ -24,24 +26,29 @@ from realtime_audio_demo.services.plate_agent_messages import (
 )
 from realtime_audio_demo.services.plate_agent_parsing import elapsed_ms
 from realtime_audio_demo.services.plate_agent_prompts import (
+    build_plate_agent_status_bar,
     build_plate_agent_system_prompt,
-    build_plate_agent_turn_instruction,
 )
 from realtime_audio_demo.services.plate_agent_response import build_output_json, reply_with_pending_confirmation
+from realtime_audio_demo.services.plate_agent_rules import is_valid_plate_number
 from realtime_audio_demo.services.plate_agent_state import clone_state
 from realtime_audio_demo.services.plate_agent_tooling import (
+    PLATE_WRITE_TOOL_NAMES,
     PlateAgentPlan,
     PlateToolExecutor,
-    build_tool_result_history_message,
+    build_assistant_tool_call_message,
+    build_compatible_observation_message,
+    build_tool_observation_messages,
     parse_agent_plan,
 )
 from realtime_audio_demo.services.plate_agent_types import (
     PlateAgentResult,
     PlateAgentState,
+    PlateConfirmationAction,
 )
 
 
-MAX_AGENT_TOOL_ROUNDS = 4
+MAX_AGENT_ITERATIONS = 8
 
 
 class PlateAgentService:
@@ -50,7 +57,7 @@ class PlateAgentService:
     主流程只负责搭建 Agent 循环：
     1. 注入后端维护的状态栏。
     2. 让模型输出 tool_calls 或 finish。
-    3. 后端执行工具并把结果回填到下一轮状态栏。
+    3. 后端执行工具并把 observation 回填到上下文。
     4. 根据最终状态生成接口需要的 JSON 和播报话术。
     """
 
@@ -66,6 +73,7 @@ class PlateAgentService:
         session_id: str = "",
         on_ack: Any = None,
         turn_summaries: list[str] | None = None,
+        include_confirmation_reply: bool = PLATE_REPLY_INCLUDE_CONFIRMATION,
     ) -> PlateAgentResult:
         started = time.perf_counter()
         working = clone_state(state)
@@ -91,28 +99,32 @@ class PlateAgentService:
             "Agent 回合开始",
             阶段="多轮确认或纠错" if working.has_car_plate else "首轮识别",
             当前状态=working.to_context(),
-            说明="后续由模型根据状态栏自主选择工具调用。",
+            说明="模型先根据本轮音频和初始状态栏规划，后续根据工具 observation 自主继续。",
         )
 
         executor = PlateToolExecutor(working)
-        tool_results: list[dict[str, Any]] = []
+        observations: list[dict[str, Any]] = []
         agent_history: list[dict[str, Any]] = []
         plans: list[dict[str, Any]] = []
         last_plan = PlateAgentPlan(raw="")
 
-        for iteration in range(1, MAX_AGENT_TOOL_ROUNDS + 1):
-            raw_plan = await self.plan_next_action(
+        for iteration in range(1, MAX_AGENT_ITERATIONS + 1):
+            raw_plan, request_status = await self.plan_next_action(
                 model=model,
                 wav_bytes=wav_bytes,
                 state=working,
-                session_id=session_id,
                 iteration=iteration,
-                tool_results=tool_results,
+                observations=observations,
                 agent_history=agent_history,
             )
             last_plan = parse_agent_plan(raw_plan)
             plans.append(last_plan.to_dict())
-            agent_history.append({"role": "assistant", "content": raw_plan})
+            if iteration == 1:
+                agent_history.append(build_audio_user_history_message(wav_bytes))
+            if last_plan.tool_calls:
+                agent_history.append(build_assistant_tool_call_message(last_plan))
+            else:
+                agent_history.append({"role": "assistant", "content": raw_plan})
             log_session_event(
                 "llm_response",
                 iteration=iteration,
@@ -123,12 +135,12 @@ class PlateAgentService:
             )
             log_agent_line(
                 "Agent 规划：模型推理是什么",
-                第几轮=iteration,
+                Agent循环序号=iteration,
                 模型输出=raw_plan,
             )
             log_agent_line(
                 "Agent 规划：tool_calls 是什么",
-                第几轮=iteration,
+                Agent循环序号=iteration,
                 thought=last_plan.thought,
                 tool_calls=[item.to_dict() for item in last_plan.tool_calls],
                 finish=last_plan.finish,
@@ -140,20 +152,15 @@ class PlateAgentService:
                     "raw": raw_plan,
                     "plan": last_plan.to_dict(),
                     "state": working.to_context(),
-                    "tool_results": tool_results,
+                    "observations": observations,
                     "agent_history": compact_agent_history(agent_history),
                 },
             )
 
             if last_plan.tool_calls:
-                current_tool_results = executor.execute_all(last_plan.tool_calls)
-                tool_results.extend(current_tool_results)
-                agent_history.append(
-                    {
-                        "role": "user",
-                        "content": build_tool_result_history_message(current_tool_results),
-                    }
-                )
+                current_observations = executor.execute_all(last_plan.tool_calls)
+                observations.extend(current_observations)
+                agent_history.extend(build_tool_observation_messages(current_observations))
                 continue
 
             if last_plan.finish:
@@ -161,7 +168,7 @@ class PlateAgentService:
 
             log_agent_line(
                 "Agent 规划为空",
-                第几轮=iteration,
+                Agent循环序号=iteration,
                 说明="模型没有输出可执行工具，也没有输出 finish，结束循环并走兜底回复。",
             )
             break
@@ -172,8 +179,9 @@ class PlateAgentService:
             working=working,
             last_plan=last_plan,
             plans=plans,
-            tool_results=tool_results,
+            observations=observations,
             agent_history=agent_history,
+            include_confirmation_reply=include_confirmation_reply,
         )
 
     async def emit_compat_ack_if_needed(self, *, on_ack: Any, state: PlateAgentState) -> None:
@@ -201,56 +209,113 @@ class PlateAgentService:
         model: str,
         wav_bytes: bytes,
         state: PlateAgentState,
-        session_id: str,
         iteration: int,
-        tool_results: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
         agent_history: list[dict[str, Any]],
-    ) -> str:
-        """调用音频模型，让模型根据状态栏输出 tool_calls 或 finish。"""
+    ) -> tuple[str, str]:
+        """调用模型，让模型根据音频、状态栏或 observation 输出 tool_calls / finish。"""
 
         system_prompt = build_plate_agent_system_prompt()
-        turn_instruction = build_plate_agent_turn_instruction(
-            state=state,
-            session_id=session_id,
-            iteration=iteration,
-            max_iterations=MAX_AGENT_TOOL_ROUNDS,
-            tool_results=tool_results,
-        )
+        status_bar = ""
+        if iteration == 1:
+            status_bar = build_plate_agent_status_bar(
+                state=state,
+            )
+        turn_instruction = status_bar if iteration == 1 else ""
+        request_history = list(agent_history)
         log_session_event(
             "llm_request",
             iteration=iteration,
             model=model or QWEN_MODEL,
             input_type="audio" if iteration == 1 else "text",
             audio_bytes=len(wav_bytes) if iteration == 1 else 0,
+            status_bar=status_bar,
             turn_instruction=turn_instruction,
             agent_history=compact_agent_history(agent_history),
             state=state.to_context(),
-            previous_tool_results=tool_results,
+            observations=observations,
         )
         if iteration == 1:
             completion = await self.model_client.complete_audio(
                 model=model or QWEN_MODEL,
                 wav_bytes=wav_bytes,
                 prompt=system_prompt,
-                history=agent_history,
+                history=request_history,
                 max_tokens=1024,
                 turn_instruction=turn_instruction,
             )
             if completion.raw_response and completion.raw_response.get("status_code"):
-                raise RuntimeError(str(completion.raw_response.get("message") or "upstream audio request failed"))
-            return completion.text or ""
+                completion = await self.retry_audio_with_compatible_history(
+                    model=model,
+                    wav_bytes=wav_bytes,
+                    system_prompt=system_prompt,
+                    agent_history=agent_history,
+                    turn_instruction=turn_instruction,
+                )
+            return completion.text or "", status_bar
 
         response, status_code = await self.model_client.complete_text(
             model=model or QWEN_MODEL,
             text=turn_instruction,
             prompt=system_prompt,
-            history=agent_history,
+            history=request_history,
             max_tokens=1024,
             output_audio=False,
         )
         if status_code >= 400:
+            response, status_code = await self.retry_text_with_compatible_history(
+                model=model,
+                system_prompt=system_prompt,
+                agent_history=agent_history,
+                turn_instruction=turn_instruction,
+            )
+        if status_code >= 400:
             raise RuntimeError(str(response.get("message") or "upstream text request failed"))
-        return str(response.get("text") or "")
+        return str(response.get("text") or ""), status_bar
+
+    async def retry_audio_with_compatible_history(
+        self,
+        *,
+        model: str,
+        wav_bytes: bytes,
+        system_prompt: str,
+        agent_history: list[dict[str, Any]],
+        turn_instruction: str,
+    ) -> Any:
+        """部分 Qwen/OpenAI 兼容服务不接受 role=tool，失败时降级成文本 observation。"""
+
+        logger.warning("plate_agent retry audio with compatible observation history")
+        completion = await self.model_client.complete_audio(
+            model=model or QWEN_MODEL,
+            wav_bytes=wav_bytes,
+            prompt=system_prompt,
+            history=compatible_agent_history(agent_history),
+            max_tokens=1024,
+            turn_instruction=turn_instruction,
+        )
+        if completion.raw_response and completion.raw_response.get("status_code"):
+            raise RuntimeError(str(completion.raw_response.get("message") or "upstream audio request failed"))
+        return completion
+
+    async def retry_text_with_compatible_history(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        agent_history: list[dict[str, Any]],
+        turn_instruction: str,
+    ) -> tuple[dict[str, Any], int]:
+        """文本续轮的兼容降级：把 tool role observation 转成 user 文本。"""
+
+        logger.warning("plate_agent retry text with compatible observation history")
+        return await self.model_client.complete_text(
+            model=model or QWEN_MODEL,
+            text=turn_instruction,
+            prompt=system_prompt,
+            history=compatible_agent_history(agent_history),
+            max_tokens=1024,
+            output_audio=False,
+        )
 
     def build_final_result(
         self,
@@ -260,15 +325,19 @@ class PlateAgentService:
         working: PlateAgentState,
         last_plan: PlateAgentPlan,
         plans: list[dict[str, Any]],
-        tool_results: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
         agent_history: list[dict[str, Any]],
+        include_confirmation_reply: bool = PLATE_REPLY_INCLUDE_CONFIRMATION,
     ) -> PlateAgentResult:
         """把 Agent 最终状态转成前端接口仍然兼容的输出格式。"""
 
         finish_status = normalize_finish_status(last_plan.finish.get("task_status"))
         reply_scene = str(last_plan.finish.get("reply_scene") or "").strip()
-        failed_result = last_failed_tool_result(tool_results)
-        state_changed = agent_changed_state(before_state, working, tool_results)
+        failed_result = last_failed_observation(observations)
+        state_changed = agent_changed_state(before_state, working)
+
+        if finish_status == "confirmed" and can_confirm_from_finish(working, observations):
+            confirm_current_plate_from_finish(working)
 
         if finish_status == "confirmed" and working.final_car_plate:
             assistant_reply = build_confirmed_reply(working.final_car_plate)
@@ -280,16 +349,21 @@ class PlateAgentService:
             )
         elif finish_status == "invalid" and failed_result is not None:
             task_status = "need_confirmation"
-            assistant_reply = build_edit_invalid_reply(working)
+            assistant_reply = build_edit_invalid_reply(working, include_confirmation=include_confirmation_reply)
         elif (not last_plan.finish or finish_status == "unclear" or failed_result is not None) and not state_changed:
             task_status = "need_confirmation"
-            assistant_reply = self.reply_for_failed_or_unclear_edit(working, failed_result)
+            assistant_reply = self.reply_for_failed_or_unclear_edit(
+                working,
+                failed_result,
+                include_confirmation_reply=include_confirmation_reply,
+            )
         else:
             task_status = "need_confirmation"
             assistant_reply = self.reply_for_current_state(
                 working,
                 before_state=before_state,
                 reply_scene=reply_scene,
+                include_confirmation_reply=include_confirmation_reply,
             )
 
         working.assistant_reply = assistant_reply
@@ -303,7 +377,7 @@ class PlateAgentService:
         latency_ms = elapsed_ms(started)
         debug = {
             "agent_plans": plans,
-            "tool_results": tool_results,
+            "observations": observations,
             "agent_history": compact_agent_history(agent_history),
             "finish": last_plan.finish,
             "car_plate": working.car_plate,
@@ -318,7 +392,7 @@ class PlateAgentService:
                 "state": working.to_context(),
                 "latency_ms": latency_ms,
                 "agent_plans": plans,
-                "tool_results": tool_results,
+                "observations": observations,
             },
         )
         log_session_event(
@@ -329,7 +403,7 @@ class PlateAgentService:
             latency_ms=latency_ms,
             state=working.to_context(),
             agent_plans=plans,
-            tool_results=tool_results,
+            observations=observations,
             agent_history=compact_agent_history(agent_history),
         )
         return PlateAgentResult(
@@ -355,11 +429,17 @@ class PlateAgentService:
         self,
         working: PlateAgentState,
         failed_result: dict[str, Any] | None,
+        *,
+        include_confirmation_reply: bool,
     ) -> str:
         message = str((failed_result or {}).get("message") or "").strip()
         if message and "格式不合法" in message:
-            return build_edit_invalid_reply(working)
-        return reply_with_pending_confirmation(message or EDIT_UNCLEAR_REPLY, working)
+            return build_edit_invalid_reply(working, include_confirmation=include_confirmation_reply)
+        return reply_with_pending_confirmation(
+            message or EDIT_UNCLEAR_REPLY,
+            working,
+            include_confirmation=include_confirmation_reply,
+        )
 
     def reply_for_current_state(
         self,
@@ -367,15 +447,36 @@ class PlateAgentService:
         *,
         before_state: dict[str, Any],
         reply_scene: str,
+        include_confirmation_reply: bool,
     ) -> str:
         if reply_scene in {"initial_success", "update_success", "partial_confirmation"}:
-            return build_fixed_reply(working, changed=reply_scene == "update_success", scene=reply_scene)
+            return build_fixed_reply(
+                working,
+                changed=reply_scene == "update_success",
+                scene=reply_scene,
+                include_confirmation=include_confirmation_reply,
+            )
         before_plate = str(before_state.get("car_plate") or "").strip()
         if not before_plate and working.car_plate:
-            return build_fixed_reply(working, changed=True, scene="initial_success")
+            return build_fixed_reply(
+                working,
+                changed=True,
+                scene="initial_success",
+                include_confirmation=include_confirmation_reply,
+            )
         if before_plate and before_plate != working.car_plate:
-            return build_fixed_reply(working, changed=True, scene="update_success")
-        return build_fixed_reply(working, changed=False, scene="partial_confirmation")
+            return build_fixed_reply(
+                working,
+                changed=True,
+                scene="update_success",
+                include_confirmation=include_confirmation_reply,
+            )
+        return build_fixed_reply(
+            working,
+            changed=False,
+            scene="partial_confirmation",
+            include_confirmation=include_confirmation_reply,
+        )
 
 
 def normalize_finish_status(value: Any) -> str:
@@ -394,8 +495,8 @@ def normalize_finish_status(value: Any) -> str:
     return aliases.get(raw, "")
 
 
-def last_failed_tool_result(tool_results: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for item in reversed(tool_results):
+def last_failed_observation(observations: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in reversed(observations):
         if item.get("success") is False:
             return item
     return None
@@ -404,7 +505,6 @@ def last_failed_tool_result(tool_results: list[dict[str, Any]]) -> dict[str, Any
 def agent_changed_state(
     before_state: dict[str, Any],
     working: PlateAgentState,
-    tool_results: list[dict[str, Any]],
 ) -> bool:
     current_state = working.to_context()
     for key in ("car_plate", "confirmed", "final_car_plate", "need_confirm_chars", "confirmed_chars"):
@@ -413,15 +513,123 @@ def agent_changed_state(
     return False
 
 
+def can_confirm_from_finish(
+    working: PlateAgentState,
+    observations: list[dict[str, Any]],
+) -> bool:
+    if working.final_car_plate:
+        return True
+    if not working.car_plate or not is_valid_plate_number(working.car_plate):
+        return False
+    return not turn_wrote_plate(observations)
+
+
+def confirm_current_plate_from_finish(working: PlateAgentState) -> None:
+    apply_confirmation_actions(
+        working,
+        [PlateConfirmationAction(action="confirm_all")],
+        source="finish.confirmed",
+    )
+    working.final_car_plate = working.car_plate
+    working.confirmed = True
+
+
+def turn_wrote_plate(observations: list[dict[str, Any]]) -> bool:
+    for item in observations:
+        if item.get("success") is True and str(item.get("name") or "").strip() in PLATE_WRITE_TOOL_NAMES:
+            return True
+    return False
+
+
 def failed_tool_name(result: dict[str, Any] | None) -> str:
     return str((result or {}).get("name") or "").strip()
+
+
+def build_audio_user_history_message(wav_bytes: bytes) -> dict[str, Any]:
+    """续轮上下文只保留用户音频占位，避免重复注入首轮状态栏。"""
+
+    return {
+        "role": "user",
+        "content": f"<user_audio>本轮用户音频已输入，字节数：{len(wav_bytes)}。</user_audio>",
+    }
+
+
+def compatible_agent_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把标准 Agent 轨迹降级为只含 user/assistant 的文本轨迹。"""
+
+    compatible: list[dict[str, Any]] = []
+    pending_observations: list[dict[str, Any]] = []
+    for item in history:
+        role = item.get("role")
+        if role == "tool":
+            pending_observations.append(tool_message_to_observation(item))
+            continue
+        flush_pending_observations(compatible, pending_observations)
+        if role == "system":
+            compatible.append({"role": "user", "content": str(item.get("content") or "")})
+        elif role == "assistant" and item.get("tool_calls"):
+            compatible.append({"role": "assistant", "content": assistant_tool_call_text(item)})
+        elif role in {"user", "assistant"}:
+            content = item.get("content")
+            if content:
+                compatible.append({"role": role, "content": content})
+    flush_pending_observations(compatible, pending_observations)
+    return compatible
+
+
+def flush_pending_observations(history: list[dict[str, Any]], observations: list[dict[str, Any]]) -> None:
+    if not observations:
+        return
+    history.append(build_compatible_observation_message(list(observations)))
+    observations.clear()
+
+
+def tool_message_to_observation(item: dict[str, Any]) -> dict[str, Any]:
+    raw_content = item.get("content")
+    if isinstance(raw_content, str):
+        try:
+            content = json.loads(raw_content)
+        except json.JSONDecodeError:
+            content = {"message": raw_content}
+    else:
+        content = raw_content if isinstance(raw_content, dict) else {}
+        return {
+            "tool_call_id": item.get("tool_call_id"),
+            "name": item.get("name") or content.get("name"),
+            "success": content.get("success"),
+            "message": content.get("message"),
+            "arguments": content.get("arguments"),
+            "data": content.get("data"),
+            "after_state": content.get("after_state"),
+        }
+
+
+def assistant_tool_call_text(item: dict[str, Any]) -> str:
+    calls: list[dict[str, Any]] = []
+    for call in item.get("tool_calls") or []:
+        function = call.get("function") if isinstance(call, dict) and isinstance(call.get("function"), dict) else {}
+        arguments = function.get("arguments")
+        try:
+            parsed_arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except json.JSONDecodeError:
+            parsed_arguments = {}
+        calls.append(
+            {
+                "name": function.get("name"),
+                "arguments": parsed_arguments or {},
+            }
+        )
+    return json.dumps({"thought": item.get("content") or "", "tool_calls": calls}, ensure_ascii=False)
 
 
 def compact_agent_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
     compacted: list[dict[str, str]] = []
     for item in history[-10:]:
         role = str(item.get("role") or "").strip()
-        content = str(item.get("content") or "").strip()
+        if item.get("tool_calls"):
+            content = assistant_tool_call_text(item)
+        else:
+            content = str(item.get("content") or "").strip()
         if not role or not content:
             continue
         compacted.append({"role": role, "content": content[:3000]})

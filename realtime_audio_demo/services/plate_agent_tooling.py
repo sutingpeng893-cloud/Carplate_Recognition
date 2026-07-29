@@ -36,11 +36,10 @@ from realtime_audio_demo.services.plate_agent_types import (
 
 
 EDIT_TOOL_NAMES = {"replace_position", "replace_char", "insert_position", "delete_position"}
+PLATE_WRITE_TOOL_NAMES = {"set_plate", *EDIT_TOOL_NAMES}
 CONFIRMATION_TOOL_NAMES = {
     "validate_plate_rules",
     "detect_confusions_by_rules",
-    "refresh_confirmation_by_rules",
-    "add_need_confirmation",
     "remove_need_confirmation",
     "add_confirmed",
     "remove_confirmed",
@@ -182,10 +181,8 @@ def normalize_tool_name(value: Any) -> str:
         "set_car_plate": "set_plate",
         "update_plate": "set_plate",
         "get_state": "get_current_state",
-        "refresh_confusions": "refresh_confirmation_by_rules",
         "detect_confusions": "detect_confusions_by_rules",
         "scan_confusions": "detect_confusions_by_rules",
-        "add_pending_confirmation": "add_need_confirmation",
         "remove_pending_confirmation": "remove_need_confirmation",
         "confirm_position": "add_confirmed",
     }
@@ -197,6 +194,7 @@ class PlateToolExecutor:
 
     def __init__(self, state: PlateAgentState) -> None:
         self.state = state
+        self.plate_written_this_turn = False
 
     def execute_all(self, tool_calls: list[PlateToolCall]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
@@ -218,6 +216,8 @@ class PlateToolExecutor:
             success = False
             message = f"工具执行异常：{exc}"
             data = {"error": str(exc)}
+        if success and call.name in PLATE_WRITE_TOOL_NAMES:
+            self.plate_written_this_turn = True
 
         after_state = self.state.to_context()
         result = {
@@ -264,9 +264,7 @@ class PlateToolExecutor:
             return self._set_plate(args)
         if name in EDIT_TOOL_NAMES:
             return self._edit_plate(name, args)
-        if name == "refresh_confirmation_by_rules":
-            return self._refresh_confirmation_by_rules(args)
-        if name in {"add_need_confirmation", "remove_need_confirmation", "add_confirmed", "remove_confirmed"}:
+        if name in {"remove_need_confirmation", "add_confirmed", "remove_confirmed"}:
             return self._apply_confirmation_action(name, args)
         if name == "confirm_all":
             return self._confirm_all()
@@ -285,19 +283,18 @@ class PlateToolExecutor:
             }
 
         confirmed_positions = parse_positions(args.get("confirmed_positions"), len(plate))
-        confirmed = parse_bool(args.get("confirmed"), default=False)
         preserve_confirmed = parse_bool(args.get("preserve_confirmed"), default=self.state.has_car_plate)
         self._write_plate(
             plate,
             confirmed_positions=confirmed_positions,
-            confirmed=confirmed,
             preserve_confirmed=preserve_confirmed,
             source="tool.set_plate",
         )
-        return True, "车牌状态已设置。", {
+        return True, "车牌状态已设置，并已按规则刷新二次确认列表。", {
             "car_plate": self.state.car_plate,
             "confirmed_positions": confirmed_positions,
             "confirmed": self.state.is_confirmed,
+            "need_confirm_chars": [item.to_public_dict() for item in self.state.need_confirm_chars],
         }
 
     def _edit_plate(self, action: str, args: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
@@ -334,11 +331,12 @@ class PlateToolExecutor:
         self._write_plate(
             result.car_plate,
             confirmed_positions=result.changed_positions,
-            confirmed=False,
             preserve_confirmed=True,
             source=f"tool.{action}",
         )
-        return True, "车牌已按工具动作更新。", public_edit_result(result)
+        data = public_edit_result(result)
+        data["need_confirm_chars"] = [item.to_public_dict() for item in self.state.need_confirm_chars]
+        return True, "车牌已按工具动作更新，并已按规则刷新二次确认列表。", data
 
     def _validate_plate_rules(self, args: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
         plate = normalize_candidate_plate(args.get("car_plate") or args.get("plate") or self.state.car_plate)
@@ -361,21 +359,16 @@ class PlateToolExecutor:
             "need_confirm_chars": [item.to_public_dict() for item in confusions],
         }
 
-    def _refresh_confirmation_by_rules(self, args: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
+    def _refresh_confirmation_after_plate_write(self, *, confirmed_positions: list[int], source: str) -> None:
         plate = clean_plate_text(self.state.car_plate)
         if not plate:
-            return False, "当前没有暂存车牌，不能更新确认列表。", {}
-        confirmed_positions = parse_positions(args.get("confirmed_positions"), len(plate))
+            return
         confusions = detect_initial_confusions_by_rule(plate)
         apply_confirmation_actions(
             self.state,
             confirmation_actions_from_confusions(confusions, confirmed_positions=confirmed_positions),
-            source="tool.refresh_confirmation_by_rules",
+            source=f"{source}.auto_confirmation_rules",
         )
-        return True, "已按规则更新二次确认列表。", {
-            "need_confirm_chars": [item.to_public_dict() for item in self.state.need_confirm_chars],
-            "confirmed_positions": confirmed_positions,
-        }
 
     def _apply_confirmation_action(self, action: str, args: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
         plate = clean_plate_text(self.state.car_plate)
@@ -396,6 +389,11 @@ class PlateToolExecutor:
     def _confirm_all(self) -> tuple[bool, str, dict[str, Any]]:
         if not self.state.car_plate:
             return False, "当前没有暂存车牌，不能确认。", {}
+        if self.plate_written_this_turn:
+            return False, "本轮已经写入或修改过车牌，不能直接确认整车牌。请先让用户确认修改后的新车牌，等待用户下一轮明确确认后再调用 confirm_all。", {
+                "blocked_until_next_turn": True,
+                "car_plate": self.state.car_plate,
+            }
         apply_confirmation_actions(
             self.state,
             [PlateConfirmationAction(action="confirm_all")],
@@ -410,12 +408,10 @@ class PlateToolExecutor:
         plate: str,
         *,
         confirmed_positions: list[int],
-        confirmed: bool,
         preserve_confirmed: bool,
         source: str,
     ) -> None:
-        # 这里只提交车牌本身，不自动扫描易混淆项。
-        # 是否调用 validate / detect_confusions / refresh_confirmation_by_rules 由 Agent 自主规划。
+        # 写入车牌后由后端立即刷新规则待确认位，避免依赖模型再规划一次扫描。
         refresh_plate_state(
             self.state,
             plate,
@@ -423,14 +419,7 @@ class PlateToolExecutor:
             confirmed=False,
             preserve_confirmed=preserve_confirmed,
         )
-        if confirmed_positions:
-            apply_confirmation_actions(
-                self.state,
-                [PlateConfirmationAction(action="add_confirmed", position=position) for position in confirmed_positions],
-                source=f"{source}.confirmed_positions",
-            )
-        if confirmed:
-            self._confirm_all()
+        self._refresh_confirmation_after_plate_write(confirmed_positions=confirmed_positions, source=source)
 
 
 def normalize_candidate_plate(value: Any) -> str:
@@ -520,9 +509,9 @@ def parse_bool(value: Any, *, default: bool) -> bool:
     return default
 
 
-def compact_tool_results(results: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+def compact_observations(observations: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
     compacted: list[dict[str, Any]] = []
-    for item in results[-limit:]:
+    for item in observations[-limit:]:
         compacted.append(
             {
                 "tool_call_id": item.get("tool_call_id"),
@@ -531,6 +520,7 @@ def compact_tool_results(results: list[dict[str, Any]], *, limit: int = 8) -> li
                 "message": item.get("message"),
                 "arguments": item.get("arguments"),
                 "data": compact_result_data(item.get("data")),
+                "after_state": compact_state(item.get("after_state")),
             }
         )
     return compacted
@@ -550,16 +540,77 @@ def compact_result_data(value: Any) -> Any:
         "error",
         "final_car_plate",
         "need_confirm_chars",
+        "blocked_until_next_turn",
         "valid",
         "vehicle_type",
     }
     return {key: value.get(key) for key in allowed if key in value}
 
 
-def build_tool_result_history_message(results: list[dict[str, Any]]) -> str:
+def compact_state(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "car_plate",
+        "plate_chars",
+        "confirmed",
+        "need_confirm_chars",
+        "confirmed_chars",
+        "vehicle_type",
+        "final_car_plate",
+    }
+    return {key: value.get(key) for key in allowed if key in value}
+
+
+def build_observation_text(observations: list[dict[str, Any]]) -> str:
     return (
-        "<tool_results>\n"
-        f"{json.dumps(compact_tool_results(results), ensure_ascii=False, indent=2)}\n"
-        "</tool_results>\n"
-        "请根据这些工具结果和下一条状态栏继续规划。"
+        "<observations>\n"
+        f"{json.dumps(compact_observations(observations), ensure_ascii=False, indent=2)}\n"
+        "</observations>"
     )
+
+
+def build_assistant_tool_call_message(plan: PlateAgentPlan) -> dict[str, Any]:
+    """把模型 JSON 规划转成标准 assistant tool_calls 历史消息。"""
+
+    return {
+        "role": "assistant",
+        "content": plan.thought or None,
+        "tool_calls": [tool_call_to_protocol_dict(call) for call in plan.tool_calls],
+    }
+
+
+def tool_call_to_protocol_dict(call: PlateToolCall) -> dict[str, Any]:
+    return {
+        "id": call.tool_call_id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json.dumps(call.arguments or {}, ensure_ascii=False),
+        },
+    }
+
+
+def build_tool_observation_messages(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把后端工具返回值转成标准 tool role observation 历史消息。"""
+
+    messages: list[dict[str, Any]] = []
+    for observation in observations:
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": str(observation.get("tool_call_id") or ""),
+                "name": str(observation.get("name") or ""),
+                "content": json.dumps(compact_observations([observation], limit=1)[0], ensure_ascii=False),
+            }
+        )
+    return messages
+
+
+def build_compatible_observation_message(observations: list[dict[str, Any]]) -> dict[str, Any]:
+    """兼容不支持 tool role 的模型服务，把 observation 降级成普通文本消息。"""
+
+    return {
+        "role": "user",
+        "content": build_observation_text(observations),
+    }

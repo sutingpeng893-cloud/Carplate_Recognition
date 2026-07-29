@@ -81,13 +81,48 @@ def log_session_event(event: str, **fields: Any) -> None:
     """详细 session JSON：一个文件保存一个会话的真实 Agent 轨迹。"""
 
     session_id = CURRENT_SESSION_ID.get() or None
-    history_entry = build_history_entry(event, fields)
+    history_entries = build_history_entries(event, fields)
+    for history_entry in history_entries:
+        write_session_trace(session_id=session_id, history_entry=history_entry)
+    history_summary = history_entries[-1] if history_entries else {}
     payload: dict[str, Any] = {
         "session_id": session_id,
-        "history": history_entry,
+        "history": history_summary,
     }
-    write_session_trace(session_id=session_id, history_entry=history_entry)
     logger.info("plate_agent_event %s", format_session_event_summary(payload))
+
+
+def build_history_entries(event: str, fields: dict[str, Any]) -> list[dict[str, Any]]:
+    if event == "llm_request":
+        status_bar = str(fields.get("status_bar") or "").strip()
+        turn_instruction = str(fields.get("turn_instruction") or "").strip()
+        entries: list[dict[str, Any]] = []
+        if fields.get("input_type") == "audio":
+            content: list[dict[str, Any]] = []
+            request_text = status_bar or turn_instruction
+            if request_text:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": request_text,
+                    }
+                )
+            content.append(
+                {
+                    "type": "audio",
+                    "audio_bytes": fields.get("audio_bytes") or 0,
+                }
+            )
+            entries.append(
+                {
+                    "role": "user",
+                    "content": content,
+                }
+            )
+        elif turn_instruction:
+            entries.append({"role": "user", "content": turn_instruction})
+        return entries
+    return [build_history_entry(event, fields)]
 
 
 def build_history_entry(event: str, fields: dict[str, Any]) -> dict[str, Any]:
@@ -101,24 +136,6 @@ def build_history_entry(event: str, fields: dict[str, Any]) -> dict[str, Any]:
                 "state": fields.get("state"),
                 "turn_summaries": fields.get("turn_summaries") or [],
             },
-        }
-    if event == "llm_request":
-        if fields.get("input_type") == "audio":
-            content: Any = [
-                {
-                    "type": "text",
-                    "text": fields.get("turn_instruction") or "",
-                },
-                {
-                    "type": "audio",
-                    "audio_bytes": fields.get("audio_bytes") or 0,
-                },
-            ]
-        else:
-            content = fields.get("turn_instruction") or ""
-        return {
-            "role": "user",
-            "content": content,
         }
     if event == "llm_response":
         return {
