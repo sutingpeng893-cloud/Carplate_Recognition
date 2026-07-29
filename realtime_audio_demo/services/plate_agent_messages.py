@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from realtime_audio_demo.services.plate_agent_rules import clean_plate_text, describe_plate_char, with_relative_confusion_reasons
+from realtime_audio_demo.services.plate_agent_rules import clean_plate_text, describe_plate_char
 from realtime_audio_demo.services.plate_agent_types import PlateAgentState
 
 
@@ -188,7 +188,7 @@ def pending_confirmation_text(state: PlateAgentState) -> str:
 
 def pending_confirmation_descriptions(state: PlateAgentState) -> list[str]:
     """把待确认字符转成用户可听懂的描述，例如“第1位是天津的津”。"""
-    items = state.need_confirm_chars or with_relative_confusion_reasons(state.car_plate, state.confusions)
+    items = state.need_confirm_chars
     descriptions: list[str] = []
     seen_positions: set[int] = set()
     for item in items:

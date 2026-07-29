@@ -196,7 +196,7 @@ def apply_confirmation_actions(
         "确认状态更新：action 是什么",
         来源=source,
         当前车牌=plate,
-        actions=[item.to_dict() for item in normalized_actions],
+        actions=[item.to_public_dict() for item in normalized_actions],
     )
 
     for action in normalized_actions:
@@ -248,14 +248,14 @@ def apply_confirmation_actions(
         "确认状态更新：action 执行结果",
         来源=source,
         当前车牌=state.car_plate,
-        二次确认列表=[item.to_dict() for item in state.need_confirm_chars],
-        已确认字符=[item.to_dict() for item in state.confirmed_chars],
+        二次确认列表=[item.to_public_dict() for item in state.need_confirm_chars],
+        已确认字符=[item.to_public_dict() for item in state.confirmed_chars],
     )
     log_node_output(
         "confirmation_state.apply_actions",
         {
             "source": source,
-            "actions": [item.to_dict() for item in normalized_actions],
+            "actions": [item.to_public_dict() for item in normalized_actions],
             "before_state": before_state,
             "state": state.to_context(),
         },

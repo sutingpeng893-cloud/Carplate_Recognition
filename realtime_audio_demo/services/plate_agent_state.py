@@ -117,7 +117,7 @@ def refresh_plate_state(
                 "confirmed": confirmed,
                 "confirmed_positions": confirmed_positions or [],
                 "preserve_confirmed": preserve_confirmed,
-                "confusions": [item.to_dict() for item in (confusions or [])],
+                "confusions": [item.to_public_dict() for item in (confusions or [])],
             },
             "before_state": before_state,
             "state": state.to_context(),
@@ -147,8 +147,5 @@ def extract_batch_commands(edit_result: PlateEditResult) -> list[dict[str, Any]]
 def format_plate_char_states(items: list[PlateCharState]) -> list[str]:
     result: list[str] = []
     for item in items:
-        label = f"第{item.position}位={item.value}"
-        if item.reason:
-            label += f"，原因：{item.reason}"
-        result.append(label)
+        result.append(f"第{item.position}位={item.value}")
     return result
