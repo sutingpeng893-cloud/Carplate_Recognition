@@ -73,6 +73,7 @@ class PlateAgentService:
         session_id: str = "",
         on_ack: Any = None,
         turn_summaries: list[str] | None = None,
+        prior_agent_history: list[dict[str, Any]] | None = None,
         include_confirmation_reply: bool = PLATE_REPLY_INCLUDE_CONFIRMATION,
     ) -> PlateAgentResult:
         started = time.perf_counter()
@@ -104,7 +105,7 @@ class PlateAgentService:
 
         executor = PlateToolExecutor(working)
         observations: list[dict[str, Any]] = []
-        agent_history: list[dict[str, Any]] = []
+        agent_history: list[dict[str, Any]] = list(prior_agent_history or [])
         plans: list[dict[str, Any]] = []
         last_plan = PlateAgentPlan(raw="")
 
@@ -379,6 +380,7 @@ class PlateAgentService:
             "agent_plans": plans,
             "observations": observations,
             "agent_history": compact_agent_history(agent_history),
+            "agent_history_messages": len(agent_history),
             "finish": last_plan.finish,
             "car_plate": working.car_plate,
             "vehicle_type": working.vehicle_type,
@@ -413,6 +415,7 @@ class PlateAgentService:
             state=working,
             latency_ms=latency_ms,
             debug=debug,
+            agent_history=agent_history,
         )
 
     def reply_without_plate(

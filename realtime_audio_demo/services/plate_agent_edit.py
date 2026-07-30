@@ -14,8 +14,8 @@ from realtime_audio_demo.services.plate_agent_messages import (
 from realtime_audio_demo.services.plate_agent_types import PlateEditCommand, PlateEditResult
 
 
-MODEL_EDIT_ACTIONS = {"replace_position", "replace_char", "insert_position", "delete_position", "none"}
-INTERNAL_EDIT_ACTIONS = MODEL_EDIT_ACTIONS | {"unknown"}
+MODEL_EDIT_ACTIONS = {"replace_position", "insert_position", "delete_position", "none"}
+INTERNAL_EDIT_ACTIONS = MODEL_EDIT_ACTIONS | {"replace_char", "unknown"}
 SPOKEN_PLATE_CHAR_REPLACEMENTS = {
     "零": "0",
     "〇": "0",
@@ -407,4 +407,3 @@ def normalize_plate_text(value: Any) -> str:
     if plate.startswith("G"):
         return "冀" + plate[1:]
     return plate
-

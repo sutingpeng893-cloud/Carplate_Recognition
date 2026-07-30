@@ -175,6 +175,7 @@ class PlateAgentResult:
     state: PlateAgentState
     latency_ms: int
     debug: dict[str, Any] = field(default_factory=dict)
+    agent_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

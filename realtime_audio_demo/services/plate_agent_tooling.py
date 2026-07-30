@@ -34,7 +34,7 @@ from realtime_audio_demo.services.plate_agent_types import (
 )
 
 
-EDIT_TOOL_NAMES = {"replace_position", "replace_char", "insert_position", "delete_position"}
+EDIT_TOOL_NAMES = {"replace_position", "insert_position", "delete_position"}
 PLATE_WRITE_TOOL_NAMES = {"set_plate", *EDIT_TOOL_NAMES}
 CONFIRMATION_TOOL_NAMES = {
     "validate_plate_rules",
@@ -172,8 +172,6 @@ def normalize_tool_name(value: Any) -> str:
     aliases = {
         "replace_at_position": "replace_position",
         "replace_by_position": "replace_position",
-        "replace_symbol": "replace_char",
-        "replace_value": "replace_char",
         "insert": "insert_position",
         "delete": "delete_position",
         "remove": "delete_position",

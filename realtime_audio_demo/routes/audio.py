@@ -47,9 +47,11 @@ from realtime_audio_demo.session_store import (
     append_history,
     build_plate_audio_input,
     clear_plate_audio_turns,
+    get_plate_agent_history,
     get_plate_agent_state,
     get_plate_turn_summaries,
     get_session_history,
+    update_plate_agent_history,
     update_plate_agent_state,
 )
 from realtime_audio_demo.sessions import AudioSession
@@ -192,6 +194,7 @@ async def chatbox_audio_stream(request: Request) -> StreamingResponse:
     model = normalize_model_name(payload.get("model") or QWEN_MODEL)
     session_id = str(payload.get("session_id") or "").strip()
     state = await get_plate_agent_state(session_id) if session_id else PlateAgentState()
+    plate_agent_history = await get_plate_agent_history(session_id) if session_id else []
     turn_summaries = await get_plate_turn_summaries(session_id) if session_id else []
     turn_wav_bytes = wav_bytes
     input_wav_bytes = wav_bytes
@@ -218,6 +221,7 @@ async def chatbox_audio_stream(request: Request) -> StreamingResponse:
                 state=state,
                 session_id=session_id,
                 turn_summaries=turn_summaries,
+                prior_agent_history=plate_agent_history,
             )
         )
         ack_task = asyncio.create_task(
@@ -260,6 +264,7 @@ async def chatbox_audio_stream(request: Request) -> StreamingResponse:
         if session_id:
             await append_audio_history(session_id, turn_wav_bytes)
             await append_history(session_id, "assistant", agent_result.history_text)
+            await update_plate_agent_history(session_id, agent_result.agent_history)
             await update_plate_agent_state(session_id, agent_result.state)
             await append_plate_turn_summary(session_id, turn_summary)
             if not state.has_car_plate:
@@ -852,6 +857,7 @@ async def finalize_session(session: AudioSession) -> None:
 
     try:
         state = await get_plate_agent_state(session.chat_session_id) if session.chat_session_id else PlateAgentState()
+        plate_agent_history = await get_plate_agent_history(session.chat_session_id) if session.chat_session_id else []
         turn_summaries = await get_plate_turn_summaries(session.chat_session_id) if session.chat_session_id else []
         input_wav = turn_wav
         if session.chat_session_id:
@@ -882,6 +888,7 @@ async def finalize_session(session: AudioSession) -> None:
                 state=state,
                 session_id=session.chat_session_id,
                 turn_summaries=turn_summaries,
+                prior_agent_history=plate_agent_history,
             )
         )
         ack_task = asyncio.create_task(
@@ -922,6 +929,7 @@ async def finalize_session(session: AudioSession) -> None:
     if session.chat_session_id:
         await append_audio_history(session.chat_session_id, turn_wav)
         await append_history(session.chat_session_id, "assistant", agent_result.history_text)
+        await update_plate_agent_history(session.chat_session_id, agent_result.agent_history)
         await update_plate_agent_state(session.chat_session_id, agent_result.state)
         await append_plate_turn_summary(session.chat_session_id, turn_summary)
         if not state.has_car_plate:
