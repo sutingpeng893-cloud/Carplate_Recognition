@@ -3,12 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from realtime_audio_demo.services.plate_agent_logging import log_agent_line, log_node_output
-from realtime_audio_demo.services.plate_agent_rules import (
-    is_rule_confusion_position,
-    normalize_plate_text,
-    vehicle_type_by_length,
-    with_relative_confusion_reasons,
-)
+from realtime_audio_demo.services.plate_agent_rules import normalize_plate_text, vehicle_type_by_length, with_relative_confusion_reasons
 from realtime_audio_demo.services.plate_agent_types import PlateAgentState, PlateCharState, PlateConfusion, PlateEditResult
 
 
@@ -42,7 +37,6 @@ def clone_state(state: PlateAgentState) -> PlateAgentState:
             confirmed=cloned_state.is_confirmed,
             preserve_confirmed=False,
         )
-    sanitize_need_confirmation_by_rules(cloned_state)
     return cloned_state
 
 
@@ -123,49 +117,11 @@ def refresh_plate_state(
                 "confirmed": confirmed,
                 "confirmed_positions": confirmed_positions or [],
                 "preserve_confirmed": preserve_confirmed,
-                "confusions": [item.to_public_dict() for item in (confusions or [])],
+                "confusions": [item.to_dict() for item in (confusions or [])],
             },
             "before_state": before_state,
             "state": state.to_context(),
         },
-    )
-
-
-def sanitize_need_confirmation_by_rules(state: PlateAgentState) -> None:
-    plate = normalize_plate_text(state.car_plate)
-    if not plate:
-        return
-    confirmed_positions = {item.position for item in state.confirmed_chars if item.position > 0}
-    filtered_by_position: dict[int, PlateConfusion] = {}
-    for item in state.confusions:
-        if item.position in confirmed_positions:
-            continue
-        if is_rule_confusion_position(plate, item.position):
-            filtered_by_position[item.position] = item
-    for item in state.need_confirm_chars:
-        if item.position in confirmed_positions:
-            continue
-        if item.position not in filtered_by_position and is_rule_confusion_position(plate, item.position):
-            filtered_by_position[item.position] = PlateConfusion(
-                position=item.position,
-                value=item.value,
-                reason=item.reason,
-                candidates=list(item.candidates),
-            )
-    expected_positions = set(filtered_by_position)
-    current_positions = {item.position for item in state.need_confirm_chars if item.position > 0}
-    if expected_positions == current_positions and all(
-        is_rule_confusion_position(plate, item.position)
-        for item in state.need_confirm_chars
-    ):
-        return
-    refresh_plate_state(
-        state,
-        plate,
-        confusions=list(filtered_by_position.values()),
-        confirmed=state.is_confirmed,
-        confirmed_positions=sorted(confirmed_positions),
-        preserve_confirmed=False,
     )
 
 
@@ -191,5 +147,8 @@ def extract_batch_commands(edit_result: PlateEditResult) -> list[dict[str, Any]]
 def format_plate_char_states(items: list[PlateCharState]) -> list[str]:
     result: list[str] = []
     for item in items:
-        result.append(f"第{item.position}位={item.value}")
+        label = f"第{item.position}位={item.value}"
+        if item.reason:
+            label += f"，原因：{item.reason}"
+        result.append(label)
     return result

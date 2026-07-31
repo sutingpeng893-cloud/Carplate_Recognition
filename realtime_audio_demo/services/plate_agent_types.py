@@ -72,12 +72,6 @@ class PlateConfusion:
             "reason": self.reason,
         }
 
-    def to_public_dict(self) -> dict[str, Any]:
-        return {
-            "position": self.position,
-            "value": self.value,
-        }
-
 
 @dataclass(slots=True)
 class PlateCharState:
@@ -123,12 +117,6 @@ class PlateCharState:
             "reason": self.reason,
         }
 
-    def to_public_dict(self) -> dict[str, Any]:
-        return {
-            "position": self.position,
-            "value": self.value,
-        }
-
 
 @dataclass(slots=True)
 class PlateAgentState:
@@ -153,16 +141,17 @@ class PlateAgentState:
         return bool(self.confirmed or self.final_car_plate)
 
     def to_context(self) -> dict[str, Any]:
-        """对外状态只暴露产品和 Agent 决策真正需要的字段。"""
-
         return {
             "car_plate": self.car_plate,
-            "plate_chars": [item.to_public_dict() for item in self.plate_chars],
+            "plate_chars": [item.to_dict() for item in self.plate_chars],
             "confirmed": self.is_confirmed,
-            "need_confirm_chars": [item.to_public_dict() for item in self.need_confirm_chars],
-            "confirmed_chars": [item.to_public_dict() for item in self.confirmed_chars],
+            "need_confirm_chars": [item.to_dict() for item in self.need_confirm_chars],
+            "confirmed_chars": [item.to_dict() for item in self.confirmed_chars],
             "vehicle_type": self.vehicle_type,
+            "confusions": [item.to_dict() for item in self.confusions],
             "final_car_plate": self.final_car_plate,
+            "assistant_reply": self.assistant_reply,
+            "ack_sent": self.ack_sent,
             "turn_summaries": list(self.turn_summaries),
         }
 
@@ -175,7 +164,6 @@ class PlateAgentResult:
     state: PlateAgentState
     latency_ms: int
     debug: dict[str, Any] = field(default_factory=dict)
-    agent_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -217,13 +205,6 @@ class PlateConfirmationAction:
             "candidates": self.candidates,
             "reason": self.reason,
             "raw": self.raw,
-        }
-
-    def to_public_dict(self) -> dict[str, Any]:
-        return {
-            "action": self.action,
-            "position": self.position,
-            "value": self.value,
         }
 
 

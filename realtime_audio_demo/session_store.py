@@ -1,12 +1,11 @@
 import asyncio
 import base64
-import copy
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from realtime_audio_demo.config import MAX_HISTORY_TURNS, PLATE_AGENT_HISTORY_TURNS, SESSION_TTL
+from realtime_audio_demo.config import MAX_HISTORY_TURNS, SESSION_TTL
 from realtime_audio_demo.services.plate_agent import PlateAgentState, clone_state
 from realtime_audio_demo.utils.audio import wav_bytes_list_to_wav_bytes, wav_bytes_to_float_samples
 
@@ -17,7 +16,6 @@ logger = logging.getLogger("uvicorn.error")
 class ChatSession:
     session_id: str
     history: list[dict[str, Any]] = field(default_factory=list)
-    plate_agent_history: list[dict[str, Any]] = field(default_factory=list)
     plate_state: PlateAgentState = field(default_factory=PlateAgentState)
     plate_audio_turns: list[bytes] = field(default_factory=list)
     plate_turn_summaries: list[str] = field(default_factory=list)
@@ -88,33 +86,6 @@ async def get_session_history(session_id: str) -> list[dict[str, Any]]:
             logger.info("session %s created", session_id)
         session.last_access = time.time()
         return list(session.history)
-
-
-async def get_plate_agent_history(session_id: str) -> list[dict[str, Any]]:
-    async with _lock:
-        session = _sessions.get(session_id)
-        if session is None:
-            session = ChatSession(session_id=session_id)
-            _sessions[session_id] = session
-            logger.info("session %s created", session_id)
-        session.last_access = time.time()
-        return copy.deepcopy(session.plate_agent_history)
-
-
-async def update_plate_agent_history(
-    session_id: str,
-    history: list[dict[str, Any]],
-    *,
-    max_turns: int = PLATE_AGENT_HISTORY_TURNS,
-) -> None:
-    async with _lock:
-        session = _sessions.get(session_id)
-        if session is None:
-            session = ChatSession(session_id=session_id)
-            _sessions[session_id] = session
-            logger.info("session %s created", session_id)
-        session.plate_agent_history = trim_plate_agent_history(copy.deepcopy(history), max_turns=max_turns)
-        session.last_access = time.time()
 
 
 async def get_plate_agent_state(session_id: str) -> PlateAgentState:
@@ -226,21 +197,10 @@ async def reset_session_state(session_id: str) -> None:
             _sessions[session_id] = session
             logger.info("session %s created", session_id)
         session.history = []
-        session.plate_agent_history = []
         session.plate_state = PlateAgentState()
         session.plate_audio_turns = []
         session.plate_turn_summaries = []
         session.last_access = time.time()
-
-
-def trim_plate_agent_history(history: list[dict[str, Any]], *, max_turns: int) -> list[dict[str, Any]]:
-    if max_turns <= 0:
-        return []
-    messages = [item for item in history if isinstance(item, dict)]
-    user_indexes = [index for index, item in enumerate(messages) if item.get("role") == "user"]
-    if len(user_indexes) <= max_turns:
-        return messages
-    return messages[user_indexes[-max_turns]:]
 
 
 async def delete_session(session_id: str) -> None:

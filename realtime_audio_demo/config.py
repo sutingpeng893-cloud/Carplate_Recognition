@@ -21,7 +21,6 @@ PREFILL_MODE = os.getenv("PREFILL_MODE", "cumulative_probe")
 FINAL_MAX_TOKENS = int(os.getenv("FINAL_MAX_TOKENS", "512"))
 REQUEST_TIMEOUT = float(os.getenv("QWEN_REQUEST_TIMEOUT", "180"))
 MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "2"))
-PLATE_AGENT_HISTORY_TURNS = int(os.getenv("PLATE_AGENT_HISTORY_TURNS", "6"))
 STREAM_FINAL_OUTPUT = os.getenv("STREAM_FINAL_OUTPUT", "1").lower() not in {"0", "false", "off", "no"}
 PLATE_REPLY_INCLUDE_CONFIRMATION = os.getenv("PLATE_REPLY_INCLUDE_CONFIRMATION", "1").lower() not in {
     "0",

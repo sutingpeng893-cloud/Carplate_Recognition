@@ -1,14 +1,17 @@
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
-from realtime_audio_demo.config import FINAL_MAX_TOKENS, QWEN_MODEL, normalize_model_name
+from realtime_audio_demo.config import CAPTURE_DIR, FINAL_MAX_TOKENS, QWEN_MODEL, normalize_model_name
+from realtime_audio_demo.services.audio_processing import audio_transcoder
 from realtime_audio_demo.services.interfaces import ChatModel, SpeechSynthesizer
 from realtime_audio_demo.services.final_plate import resolve_confirmed_plate_output
 from realtime_audio_demo.services.model_gateway import model_gateway
 from realtime_audio_demo.services.output_filter import normalize_assistant_output, validate_current_normalized_plate
 from realtime_audio_demo.services.plate_agent_history import build_plate_turn_summary
+from realtime_audio_demo.services.plate_agent_logging import safe_session_filename
 from realtime_audio_demo.services.plate_agent_messages import SESSION_OPENING_TEXT
 from realtime_audio_demo.services.plate_agent import PlateAgentState, get_plate_agent_service
 from realtime_audio_demo.services.prompt_provider import system_prompt_provider
@@ -20,13 +23,11 @@ from realtime_audio_demo.session_store import (
     append_history,
     build_plate_audio_input,
     clear_plate_audio_turns,
-    get_plate_agent_history,
     get_plate_agent_state,
     get_plate_turn_summaries,
     get_session_history,
     append_plate_turn_summary,
     reset_session_state,
-    update_plate_agent_history,
     update_plate_agent_state,
 )
 
@@ -138,7 +139,6 @@ class ChatboxApplicationService:
         model = normalize_model_name(payload.get("model") or QWEN_MODEL)
         session_id = str(payload.get("session_id") or "").strip()
         state = await get_plate_agent_state(session_id) if session_id else PlateAgentState()
-        plate_agent_history = await get_plate_agent_history(session_id) if session_id else []
         turn_summaries = await get_plate_turn_summaries(session_id) if session_id else []
         turn_wav_bytes = wav_bytes
         input_wav_bytes = wav_bytes
@@ -148,6 +148,8 @@ class ChatboxApplicationService:
                 turn_wav_bytes,
                 has_plate=state.has_car_plate,
             )
+        input_path = CAPTURE_DIR / f"{safe_session_filename(session_id or 'http')}_{int(time.time() * 1000)}_input.wav"
+        audio_transcoder.save_wav(input_wav_bytes, input_path)
         try:
             agent = get_plate_agent_service(self.model_client)
             agent_result = await agent.handle_audio_turn(
@@ -155,8 +157,8 @@ class ChatboxApplicationService:
                 wav_bytes=input_wav_bytes,
                 state=state,
                 session_id=session_id,
+                user_audio_path=str(input_path),
                 turn_summaries=turn_summaries,
-                prior_agent_history=plate_agent_history,
             )
         except Exception as exc:
             return {"message": f"upstream audio request failed: {exc}"}, 502
@@ -169,7 +171,6 @@ class ChatboxApplicationService:
         if session_id:
             await append_audio_history(session_id, turn_wav_bytes)
             await append_history(session_id, "assistant", agent_result.history_text)
-            await update_plate_agent_history(session_id, agent_result.agent_history)
             await update_plate_agent_state(session_id, agent_result.state)
             await append_plate_turn_summary(session_id, turn_summary)
             if not state.has_car_plate:
@@ -191,6 +192,7 @@ class ChatboxApplicationService:
             "user_display_text": "",
             "output_is_json": True,
             "latency_ms": agent_result.latency_ms,
+            "saved_input_wav": str(input_path),
             "ttft_ms": None,
             "agent_state": agent_result.state.to_context(),
             "agent_debug": agent_result.debug,
