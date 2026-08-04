@@ -1,0 +1,326 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2100" height="3800" viewBox="0 0 2100 3800" role="img" aria-labelledby="svgTitle svgDesc">
+  <title id="svgTitle">新版车牌语音识别 Agent 完整交互流程</title>
+  <desc id="svgDesc">依据 services(4).zip 的实际代码绘制。左侧为用户，右侧为车牌识别 Agent，中间展示首轮识别、多轮确认、最多三步纠错、确定性编辑、完整规则校验、易混淆字符确认及最终车牌输出。</desc>
+
+  <defs>
+    <linearGradient id="headerGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0b4f86"/>
+      <stop offset="100%" stop-color="#256aa5"/>
+    </linearGradient>
+    <linearGradient id="panelGradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#edf6ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-12%" y="-12%" width="124%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#17324d" flood-opacity="0.13"/>
+    </filter>
+
+    <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#1d6fb8"/>
+    </marker>
+    <marker id="arrowDark" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#40586b"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#16875b"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#d97706"/>
+    </marker>
+
+    <style>
+      .page { fill: #ffffff; }
+      .title { font: 700 39px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #ffffff; }
+      .subtitle { font: 400 18px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #dbeafe; }
+      .actor { fill: #f8fbff; stroke: #78a5cd; stroke-width: 2.2; rx: 18; filter: url(#shadow); }
+      .actor-agent { fill: #edf7ff; stroke: #3d82bc; stroke-width: 2.2; rx: 18; filter: url(#shadow); }
+      .actor-title { font: 700 25px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #17324a; }
+      .actor-sub { font: 400 15px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #5b7185; }
+      .lifeline { stroke: #a3b3c0; stroke-width: 2; stroke-dasharray: 10 10; }
+      .activation { fill: #e6f1fb; stroke: #4f8fbd; stroke-width: 2; rx: 9; }
+
+      .phase { fill: url(#panelGradient); stroke: #78a8d0; stroke-width: 2; rx: 22; filter: url(#shadow); }
+      .phase-neutral { fill: #fafcfe; stroke: #9cb0c0; stroke-width: 2; rx: 22; filter: url(#shadow); }
+      .section-pill { fill: #1d6fb8; rx: 15; }
+      .section-pill-orange { fill: #c96b0b; rx: 15; }
+      .section-pill-green { fill: #16875b; rx: 15; }
+      .section-pill-text { font: 700 17px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #ffffff; }
+      .phase-sub { font: 400 15px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #526d82; }
+
+      .step { fill: #ffffff; stroke: #8ca8bd; stroke-width: 2; rx: 14; }
+      .step-blue { fill: #f2f8ff; stroke: #4f8fbd; stroke-width: 2; rx: 14; }
+      .step-green { fill: #effaf5; stroke: #43a37d; stroke-width: 2; rx: 14; }
+      .step-orange { fill: #fff8ec; stroke: #dfa349; stroke-width: 2; rx: 14; }
+      .step-red { fill: #fff4f2; stroke: #dc7b68; stroke-width: 2; rx: 14; }
+      .decision { fill: #fff7df; stroke: #d59a29; stroke-width: 2.2; }
+      .terminal { fill: #eaf8f1; stroke: #218763; stroke-width: 2.4; rx: 16; filter: url(#shadow); }
+      .note { fill: #f8fafc; stroke: #a8bac9; stroke-width: 1.8; stroke-dasharray: 7 6; rx: 14; }
+      .warning-note { fill: #fff8ec; stroke: #d99a39; stroke-width: 1.9; stroke-dasharray: 7 6; rx: 14; }
+
+      .box-title { font: 700 18px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #172f43; }
+      .box-text { font: 400 15px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #415a6e; }
+      .box-small { font: 400 14px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #52697b; }
+      .decision-text { font: 700 16px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #5f450f; }
+      .message { font: 700 18px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #17324d; }
+      .message-note { font: 400 14px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #587083; }
+      .edge-label { font: 700 14px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #465c6e; }
+      .edge-green { font: 700 14px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #14704d; }
+      .edge-orange { font: 700 14px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #a35b08; }
+      .code { font: 600 14px Consolas,"SFMono-Regular",monospace; fill: #234761; }
+      .footer-title { font: 700 18px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #17324d; }
+      .footer-text { font: 400 14px "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",sans-serif; fill: #52697b; }
+
+      .arrow-in { stroke: #1d6fb8; stroke-width: 3.3; fill: none; marker-end: url(#arrowBlue); }
+      .arrow-out { stroke: #40586b; stroke-width: 3.3; fill: none; marker-end: url(#arrowDark); }
+      .arrow-green { stroke: #16875b; stroke-width: 3.1; fill: none; marker-end: url(#arrowGreen); }
+      .arrow-orange { stroke: #d97706; stroke-width: 3.1; fill: none; marker-end: url(#arrowOrange); }
+      .arrow-inner { stroke: #607789; stroke-width: 2.4; fill: none; marker-end: url(#arrowDark); }
+      .arrow-loop { stroke: #1d6fb8; stroke-width: 2.8; fill: none; stroke-dasharray: 8 7; marker-end: url(#arrowBlue); }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="2100" height="3800"/>
+  <rect x="0" y="0" width="2100" height="116" fill="url(#headerGradient)"/>
+  <text class="title" x="1050" y="52" text-anchor="middle">新版车牌语音识别 Agent 完整交互流程</text>
+  <text class="subtitle" x="1050" y="86" text-anchor="middle">依据 services(4).zip 实际代码 · 用户 / Agent 双侧交互 · 确定性规则与编辑函数减少幻觉</text>
+
+  <!-- 双侧角色与生命线 -->
+  <rect class="actor" x="90" y="150" width="350" height="94"/>
+  <text class="actor-title" x="265" y="188" text-anchor="middle">用户</text>
+  <text class="actor-sub" x="265" y="218" text-anchor="middle">口述、确认、纠错或补充</text>
+
+  <rect class="actor-agent" x="1660" y="150" width="350" height="94"/>
+  <text class="actor-title" x="1835" y="188" text-anchor="middle">车牌识别 Agent</text>
+  <text class="actor-sub" x="1835" y="218" text-anchor="middle">状态编排 + 模型节点 + 规则函数</text>
+
+  <line class="lifeline" x1="265" y1="244" x2="265" y2="3660"/>
+  <line class="lifeline" x1="1835" y1="244" x2="1835" y2="3660"/>
+  <rect class="activation" x="1822" y="286" width="26" height="3308"/>
+
+  <!-- 开始交互 -->
+  <path class="arrow-out" d="M1822,308 L291,308"/>
+  <text class="message" x="1050" y="291" text-anchor="middle">① 会话开始：请告诉我您的车牌号</text>
+  <text class="message-note" x="1050" y="334" text-anchor="middle">接口层初始化 PlateAgentState；可按时间表发送 ACK，ACK 不改变车牌状态</text>
+
+  <rect class="step-blue" x="90" y="374" width="350" height="100"/>
+  <text class="box-title" x="265" y="410" text-anchor="middle">用户提交本轮 WAV 音频</text>
+  <text class="box-text" x="265" y="440" text-anchor="middle">首轮报车牌 / 后续确认或纠错</text>
+  <path class="arrow-in" d="M291,505 L1822,505"/>
+  <text class="message" x="1050" y="489" text-anchor="middle">② 音频 + session_id + 当前状态 + 最近 6 轮摘要</text>
+  <text class="message-note" x="1050" y="532" text-anchor="middle">handle_audio_turn() 先 clone_state()，所有处理在 working 副本上完成</text>
+
+  <!-- 总分流 -->
+  <rect class="phase" x="485" y="580" width="1130" height="250"/>
+  <rect class="section-pill" x="520" y="606" width="280" height="38"/>
+  <text class="section-pill-text" x="660" y="632" text-anchor="middle">A. 回合入口与状态分流</text>
+  <text class="phase-sub" x="825" y="632">plate_agent.py 只负责编排；具体节点位于 plate_agent_nodes.py</text>
+
+  <rect class="step" x="545" y="680" width="330" height="96"/>
+  <text class="box-title" x="710" y="715" text-anchor="middle">复制旧状态到 working</text>
+  <text class="box-text" x="710" y="744" text-anchor="middle">失败时不污染调用方旧状态</text>
+
+  <polygon class="decision" points="1090,665 1245,728 1090,791 935,728"/>
+  <text class="decision-text" x="1090" y="721" text-anchor="middle">working 中已有</text>
+  <text class="decision-text" x="1090" y="745" text-anchor="middle">暂存车牌？</text>
+  <path class="arrow-inner" d="M875,728 L935,728"/>
+
+  <rect class="step-blue" x="1310" y="680" width="245" height="96"/>
+  <text class="box-title" x="1432" y="714" text-anchor="middle">进入对应链路</text>
+  <text class="box-small" x="1432" y="742" text-anchor="middle">无：首轮识别</text>
+  <text class="box-small" x="1432" y="764" text-anchor="middle">有：确认或纠错</text>
+  <path class="arrow-inner" d="M1245,728 L1310,728"/>
+
+  <!-- 首轮识别 -->
+  <rect class="phase" x="485" y="885" width="1130" height="940"/>
+  <rect class="section-pill" x="520" y="911" width="280" height="38"/>
+  <text class="section-pill-text" x="660" y="937" text-anchor="middle">B. 首轮识别：尚无暂存车牌</text>
+  <text class="phase-sub" x="825" y="937">音频模型负责提取；后端负责归一化、长度判断和确认状态</text>
+
+  <rect class="step-blue" x="560" y="986" width="320" height="106"/>
+  <text class="box-title" x="720" y="1021" text-anchor="middle">模型判断是否包含车牌</text>
+  <text class="box-text" x="720" y="1050" text-anchor="middle">detect_plate_presence()</text>
+  <text class="box-small" x="720" y="1075" text-anchor="middle">只解析 true / false</text>
+
+  <polygon class="decision" points="1050,976 1185,1039 1050,1102 915,1039"/>
+  <text class="decision-text" x="1050" y="1032" text-anchor="middle">音频中</text>
+  <text class="decision-text" x="1050" y="1056" text-anchor="middle">有车牌？</text>
+  <path class="arrow-inner" d="M880,1039 L915,1039"/>
+
+  <rect class="step-red" x="1260" y="986" width="290" height="106"/>
+  <text class="box-title" x="1405" y="1021" text-anchor="middle">没有车牌内容</text>
+  <text class="box-text" x="1405" y="1050" text-anchor="middle">task_status = need_more_info</text>
+  <text class="box-small" x="1405" y="1075" text-anchor="middle">提示用户继续报车牌</text>
+  <path class="arrow-orange" d="M1185,1039 L1260,1039"/>
+  <text class="edge-orange" x="1222" y="1024" text-anchor="middle">否</text>
+
+  <rect class="step-blue" x="560" y="1150" width="320" height="118"/>
+  <text class="box-title" x="720" y="1185" text-anchor="middle">提取并归一化候选车牌</text>
+  <text class="box-small" x="720" y="1213" text-anchor="middle">extract_car_plate() / clean / uppercase</text>
+  <text class="box-small" x="720" y="1238" text-anchor="middle">首位为 ASCII 时重识别省份；G→冀</text>
+  <path class="arrow-green" d="M1050,1102 L1050,1126 L720,1126 L720,1150"/>
+  <text class="edge-green" x="1067" y="1127">是</text>
+
+  <polygon class="decision" points="1050,1146 1200,1209 1050,1272 900,1209"/>
+  <text class="decision-text" x="1050" y="1202" text-anchor="middle">长度是否为</text>
+  <text class="decision-text" x="1050" y="1226" text-anchor="middle">7 位或 8 位？</text>
+  <path class="arrow-inner" d="M880,1209 L900,1209"/>
+
+  <rect class="step-red" x="1260" y="1155" width="290" height="108"/>
+  <text class="box-title" x="1405" y="1190" text-anchor="middle">长度不合法</text>
+  <text class="box-text" x="1405" y="1219" text-anchor="middle">task_status = invalid</text>
+  <text class="box-small" x="1405" y="1244" text-anchor="middle">不写入暂存车牌</text>
+  <path class="arrow-orange" d="M1200,1209 L1260,1209"/>
+  <text class="edge-orange" x="1230" y="1194" text-anchor="middle">否</text>
+
+  <rect class="step-green" x="560" y="1328" width="320" height="126"/>
+  <text class="box-title" x="720" y="1363" text-anchor="middle">写入暂存车牌</text>
+  <text class="box-small" x="720" y="1391" text-anchor="middle">refresh_plate_state()</text>
+  <text class="box-small" x="720" y="1416" text-anchor="middle">7 位 fuel / 8 位 new_energy</text>
+  <text class="box-small" x="720" y="1441" text-anchor="middle">final_car_plate 保持为空</text>
+  <path class="arrow-green" d="M1050,1272 L1050,1301 L720,1301 L720,1328"/>
+  <text class="edge-green" x="1067" y="1302">是</text>
+
+  <rect class="step-green" x="970" y="1328" width="320" height="126"/>
+  <text class="box-title" x="1130" y="1363" text-anchor="middle">规则扫描易混淆字符</text>
+  <text class="box-small" x="1130" y="1391" text-anchor="middle">省份：甘/赣/津/京/桂/贵/冀/吉</text>
+  <text class="box-small" x="1130" y="1416" text-anchor="middle">字符：1/E、2/R</text>
+  <text class="box-small" x="1130" y="1441" text-anchor="middle">生成 need_confirm_chars</text>
+  <path class="arrow-inner" d="M880,1391 L970,1391"/>
+
+  <rect class="step-blue" x="970" y="1504" width="320" height="112"/>
+  <text class="box-title" x="1130" y="1539" text-anchor="middle">生成首轮播报话术</text>
+  <text class="box-small" x="1130" y="1567" text-anchor="middle">generate_reply(scene=initial_success)</text>
+  <text class="box-small" x="1130" y="1592" text-anchor="middle">task_status = need_confirmation</text>
+  <path class="arrow-inner" d="M1130,1454 L1130,1504"/>
+
+  <rect class="warning-note" x="550" y="1668" width="1000" height="112"/>
+  <text class="box-title" x="1050" y="1703" text-anchor="middle">当前代码的重要边界：首轮只调用 vehicle_type_by_length() 判断 7/8 位</text>
+  <text class="box-small" x="1050" y="1732" text-anchor="middle">尚未调用 is_valid_plate_number() 完整校验省份、第 2 位和尾部字符位置</text>
+  <text class="box-small" x="1050" y="1757" text-anchor="middle">因此“长度正确但格式错误”的候选仍可能进入暂存状态；这是后续接入 inspect_plate 的优先改进点</text>
+
+  <!-- 回复用户 -->
+  <path class="arrow-out" d="M1822,1874 L291,1874"/>
+  <text class="message" x="1050" y="1857" text-anchor="middle">③ 返回首轮结果：未听到 / 长度无效 / 播报暂存车牌并要求确认</text>
+  <text class="message-note" x="1050" y="1901" text-anchor="middle">输出 JSON：task_status、car_plate、assistant_reply；随后可经 TTS 播放</text>
+
+  <rect class="step-blue" x="90" y="1945" width="350" height="122"/>
+  <text class="box-title" x="265" y="1980" text-anchor="middle">用户进行下一轮回复</text>
+  <text class="box-text" x="265" y="2010" text-anchor="middle">“对，就是这个”</text>
+  <text class="box-text" x="265" y="2038" text-anchor="middle">或“第三位不是 1，是 E”</text>
+  <path class="arrow-in" d="M291,2102 L1822,2102"/>
+  <text class="message" x="1050" y="2086" text-anchor="middle">④ 提交确认 / 纠错语音，携带当前暂存状态进入多轮链路</text>
+
+  <!-- 多轮确认与纠错 -->
+  <rect class="phase-neutral" x="485" y="2160" width="1130" height="1125"/>
+  <rect class="section-pill-orange" x="520" y="2186" width="300" height="38"/>
+  <text class="section-pill-text" x="670" y="2212" text-anchor="middle">C. 多轮确认或纠错：已有暂存车牌</text>
+  <text class="phase-sub" x="850" y="2212">先判整车确认；否则进入 Prompt JSON action + 后端确定性编辑</text>
+
+  <rect class="step-blue" x="560" y="2264" width="330" height="108"/>
+  <text class="box-title" x="725" y="2299" text-anchor="middle">模型判断是否确认整车牌</text>
+  <text class="box-small" x="725" y="2327" text-anchor="middle">detect_confirmation()</text>
+  <text class="box-small" x="725" y="2352" text-anchor="middle">结合上一条回复与最近轮次摘要</text>
+
+  <polygon class="decision" points="1080,2255 1225,2318 1080,2381 935,2318"/>
+  <text class="decision-text" x="1080" y="2311" text-anchor="middle">用户明确确认</text>
+  <text class="decision-text" x="1080" y="2335" text-anchor="middle">当前完整车牌？</text>
+  <path class="arrow-inner" d="M890,2318 L935,2318"/>
+
+  <rect class="terminal" x="1280" y="2264" width="280" height="108"/>
+  <text class="box-title" x="1420" y="2299" text-anchor="middle">confirm_all</text>
+  <text class="box-small" x="1420" y="2327" text-anchor="middle">清空待确认并标记全部已确认</text>
+  <text class="box-small" x="1420" y="2352" text-anchor="middle">final_car_plate = car_plate</text>
+  <path class="arrow-green" d="M1225,2318 L1280,2318"/>
+  <text class="edge-green" x="1252" y="2303" text-anchor="middle">是</text>
+
+  <rect class="step-orange" x="560" y="2442" width="330" height="130"/>
+  <text class="box-title" x="725" y="2477" text-anchor="middle">模型生成编辑 action JSON</text>
+  <text class="box-small" x="725" y="2505" text-anchor="middle">replace_position / replace_char</text>
+  <text class="box-small" x="725" y="2530" text-anchor="middle">insert_position / delete_position / none</text>
+  <text class="box-small" x="725" y="2555" text-anchor="middle">一次可输出 actions 列表</text>
+  <path class="arrow-orange" d="M1080,2381 L1080,2411 L725,2411 L725,2442"/>
+  <text class="edge-orange" x="1097" y="2412">否</text>
+
+  <rect class="step-green" x="970" y="2442" width="330" height="130"/>
+  <text class="box-title" x="1135" y="2477" text-anchor="middle">后端确定性解析并执行</text>
+  <text class="box-small" x="1135" y="2505" text-anchor="middle">parse_plate_edit_commands()</text>
+  <text class="box-small" x="1135" y="2530" text-anchor="middle">apply_plate_edit_commands()</text>
+  <text class="box-small" x="1135" y="2555" text-anchor="middle">位置错误/重复字符不猜测</text>
+  <path class="arrow-green" d="M890,2507 L970,2507"/>
+
+  <rect class="step-blue" x="970" y="2624" width="330" height="126"/>
+  <text class="box-title" x="1135" y="2659" text-anchor="middle">模型复核本步编辑</text>
+  <text class="box-small" x="1135" y="2687" text-anchor="middle">valid_result / needs_more_edit</text>
+  <text class="box-small" x="1135" y="2712" text-anchor="middle">confirmed_positions / reason</text>
+  <text class="box-small" x="1135" y="2737" text-anchor="middle">review_plate_update()</text>
+  <path class="arrow-inner" d="M1135,2572 L1135,2624"/>
+
+  <polygon class="decision" points="730,2624 870,2687 730,2750 590,2687"/>
+  <text class="decision-text" x="730" y="2680" text-anchor="middle">review 有效且</text>
+  <text class="decision-text" x="730" y="2704" text-anchor="middle">还需继续编辑？</text>
+  <path class="arrow-inner" d="M970,2687 L870,2687"/>
+
+  <path class="arrow-loop" d="M730,2624 L730,2594 L520,2594 L520,2507 L560,2507"/>
+  <text class="edge-label" x="532" y="2581">是：最多重复 3 步</text>
+
+  <rect class="step-red" x="560" y="2808" width="330" height="130"/>
+  <text class="box-title" x="725" y="2843" text-anchor="middle">无改动或复核失败</text>
+  <text class="box-small" x="725" y="2871" text-anchor="middle">none + 确认位置：部分确认</text>
+  <text class="box-small" x="725" y="2896" text-anchor="middle">意图不清：保留旧车牌并追问</text>
+  <text class="box-small" x="725" y="2921" text-anchor="middle">不覆盖原状态</text>
+  <path class="arrow-orange" d="M680,2744 L680,2808"/>
+  <text class="edge-orange" x="697" y="2783">无有效新车牌</text>
+
+  <polygon class="decision" points="1135,2800 1285,2868 1135,2936 985,2868"/>
+  <text class="decision-text" x="1135" y="2852" text-anchor="middle">is_valid_plate_number()</text>
+  <text class="decision-text" x="1135" y="2876" text-anchor="middle">完整规则校验通过？</text>
+  <text class="decision-text" x="1135" y="2900" text-anchor="middle">省份 / 第2位 / 尾部字符</text>
+  <path class="arrow-green" d="M1135,2750 L1135,2800"/>
+  <text class="edge-green" x="1152" y="2780">结束编辑</text>
+
+  <rect class="step-red" x="1325" y="2808" width="235" height="120"/>
+  <text class="box-title" x="1442" y="2843" text-anchor="middle">校验不通过</text>
+  <text class="box-small" x="1442" y="2871" text-anchor="middle">保留旧车牌</text>
+  <text class="box-small" x="1442" y="2896" text-anchor="middle">返回修改无效话术</text>
+  <path class="arrow-orange" d="M1285,2868 L1325,2868"/>
+  <text class="edge-orange" x="1305" y="2853" text-anchor="middle">否</text>
+
+  <rect class="step-green" x="970" y="2984" width="330" height="132"/>
+  <text class="box-title" x="1135" y="3019" text-anchor="middle">合法后提交暂存状态</text>
+  <text class="box-small" x="1135" y="3047" text-anchor="middle">refresh_plate_state(preserve_confirmed=True)</text>
+  <text class="box-small" x="1135" y="3072" text-anchor="middle">重扫规则易混淆位</text>
+  <text class="box-small" x="1135" y="3097" text-anchor="middle">模型 action 更新待确认/已确认列表</text>
+  <path class="arrow-green" d="M1135,2936 L1135,2984"/>
+  <text class="edge-green" x="1152" y="2964">是</text>
+
+  <rect class="note" x="540" y="3162" width="1020" height="82"/>
+  <text class="box-title" x="1050" y="3194" text-anchor="middle">新版代码采用 Prompt 约定的 JSON action，不是请求侧注册的原生 Function Calling Schema</text>
+  <text class="box-small" x="1050" y="3221" text-anchor="middle">确定性编辑函数已经落地；建议后续收敛为 inspect_plate + modify_plate 两个上层工具</text>
+
+  <!-- 返回与循环 -->
+  <path class="arrow-out" d="M1822,3338 L291,3338"/>
+  <text class="message" x="1050" y="3321" text-anchor="middle">⑤ Agent 返回：继续确认 / 说明修改无效 / 最终确认成功</text>
+  <text class="message-note" x="1050" y="3365" text-anchor="middle">未最终确认时继续返回 car_plate + assistant_reply；确认时额外返回 final_car_plate</text>
+
+  <rect class="step-blue" x="90" y="3410" width="350" height="116"/>
+  <text class="box-title" x="265" y="3445" text-anchor="middle">用户继续确认剩余字符</text>
+  <text class="box-text" x="265" y="3475" text-anchor="middle">或再次纠错 / 完整重报</text>
+  <text class="box-small" x="265" y="3502" text-anchor="middle">直到明确确认整车牌</text>
+
+  <path class="arrow-loop" d="M291,3550 L520,3550 L520,3480 L1750,3480 L1750,2132 L1822,2132"/>
+  <text class="edge-label" x="1050" y="3534" text-anchor="middle">未完成：新一轮继续携带 car_plate、need_confirm_chars、confirmed_chars</text>
+
+  <rect class="terminal" x="1660" y="3410" width="350" height="116"/>
+  <text class="box-title" x="1835" y="3445" text-anchor="middle">task_status = confirmed</text>
+  <text class="box-text" x="1835" y="3475" text-anchor="middle">final_car_plate 锁定</text>
+  <text class="box-small" x="1835" y="3502" text-anchor="middle">“好的，已确认您的车牌号是…”</text>
+
+  <!-- 底部说明 -->
+  <rect class="note" x="90" y="3620" width="1920" height="126"/>
+  <text class="footer-title" x="130" y="3654">核心状态：</text>
+  <text class="code" x="260" y="3654">car_plate · vehicle_type · need_confirm_chars · confirmed_chars · final_car_plate · assistant_reply</text>
+  <text class="footer-title" x="130" y="3690">职责边界：</text>
+  <text class="footer-text" x="260" y="3690">模型理解语音和生成 action；后端函数按位置确定性修改并校验；状态层只在成功后提交；最终结果必须由用户明确确认。</text>
+  <text class="footer-title" x="130" y="3726">代码映射：</text>
+  <text class="footer-text" x="260" y="3726">plate_agent.py（编排）｜plate_agent_nodes.py（模型节点）｜plate_agent_edit.py（确定性编辑）｜plate_agent_rules.py（规则）｜plate_agent_confirmation.py（确认状态）</text>
+</svg>
