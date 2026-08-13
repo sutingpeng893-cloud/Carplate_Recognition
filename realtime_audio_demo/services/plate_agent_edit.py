@@ -41,11 +41,13 @@ SPOKEN_PLATE_CHAR_REPLACEMENTS = {
     "圈": "Q",
 }
 def parse_plate_edit_command(text: Any) -> PlateEditCommand:
+    """解析文本为单条编辑指令，取列表第一项；解析失败返回 unknown 指令。"""
     commands = parse_plate_edit_commands(text)
     return commands[0] if commands else unknown_edit_command()
 
 
 def parse_plate_edit_commands(text: Any) -> list[PlateEditCommand]:
+    """解析文本为编辑指令列表；支持 JSON 数组、actions/commands 字段和 tool_calls 格式。"""
     value = parse_json_value(text)
     command_items = extract_command_items(value)
     commands = [parse_plate_edit_command_data(item) for item in command_items if isinstance(item, dict)]
@@ -53,6 +55,7 @@ def parse_plate_edit_commands(text: Any) -> list[PlateEditCommand]:
 
 
 def extract_command_items(value: Any) -> list[dict[str, Any]]:
+    """从 JSON 结构中提取编辑指令 dict 列表，兼容 actions/commands/tool_calls 等多种模型输出格式。"""
     if isinstance(value, list):
         return [item for item in value if isinstance(item, dict)]
     if not isinstance(value, dict):
@@ -82,6 +85,7 @@ def extract_command_items(value: Any) -> list[dict[str, Any]]:
 
 
 def parse_plate_edit_command_data(data: dict[str, Any]) -> PlateEditCommand:
+    """将单个 dict 解析为 PlateEditCommand，兼容 tool_calls/function_call/arguments 嵌套格式。"""
     tool_calls = data.get("tool_calls")
     if isinstance(tool_calls, list) and tool_calls:
         first_tool = tool_calls[0]
@@ -132,10 +136,12 @@ def parse_plate_edit_command_data(data: dict[str, Any]) -> PlateEditCommand:
 
 
 def unknown_edit_command() -> PlateEditCommand:
+    """创建 action="unknown" 的默认占位编辑指令。"""
     return PlateEditCommand(action="unknown", raw={})
 
 
 def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> PlateEditResult:
+    """对当前车牌执行单条编辑指令（replace_position/replace_char/insert_position/delete_position），纯规则无模型。"""
     plate = normalize_plate_text(current_plate)
     action = command.action
     if action == "none":
@@ -177,6 +183,7 @@ def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> P
 
 
 def apply_plate_edit_commands(current_plate: str, commands: list[PlateEditCommand]) -> PlateEditResult:
+    """顺序执行多条编辑指令，任一步失败则立即终止并返回当前结果，纯规则无模型。"""
     plate = normalize_plate_text(current_plate)
     normalized_commands = commands or [unknown_edit_command()]
     if len(normalized_commands) == 1:
@@ -249,6 +256,7 @@ def apply_plate_edit_commands(current_plate: str, commands: list[PlateEditComman
 
 
 def apply_replace_char(plate: str, chars: list[str], command: PlateEditCommand) -> PlateEditResult:
+    """按旧字符值查找并替换为新字符，支持 first/last/all 三种出现位置模式。"""
     if not command.old_value or not command.value:
         return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
     indexes = [index for index, char in enumerate(chars) if char == command.old_value]
@@ -267,6 +275,7 @@ def apply_replace_char(plate: str, chars: list[str], command: PlateEditCommand) 
 
 
 def edit_success(chars: list[str], command: PlateEditCommand, *, changed_positions: list[int]) -> PlateEditResult:
+    """构造编辑成功的 PlateEditResult 结果对象。"""
     return PlateEditResult(
         car_plate=normalize_plate_text("".join(chars)),
         changed=True,
@@ -276,6 +285,7 @@ def edit_success(chars: list[str], command: PlateEditCommand, *, changed_positio
 
 
 def edit_error(plate: str, command: PlateEditCommand, error: str) -> PlateEditResult:
+    """构造编辑失败的 PlateEditResult 结果对象。"""
     return PlateEditResult(
         car_plate=normalize_plate_text(plate),
         changed=False,
@@ -285,11 +295,13 @@ def edit_error(plate: str, command: PlateEditCommand, error: str) -> PlateEditRe
 
 
 def parse_json_object(text: Any) -> dict[str, Any]:
+    """从文本解析 JSON，返回 dict；失败返回空 dict。"""
     value = parse_json_value(text)
     return value if isinstance(value, dict) else {}
 
 
 def parse_json_value(text: Any) -> Any:
+    """从文本中提取并解析 JSON 值（借助 extract_json_candidate 提取候选片段）。"""
     raw = str(text or "").strip()
     if not raw:
         return None
@@ -301,6 +313,7 @@ def parse_json_value(text: Any) -> Any:
 
 
 def parse_arguments_object(value: Any) -> dict[str, Any] | None:
+    """将字符串或 dict 解析为参数 dict；非法输入返回 None。"""
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
@@ -313,11 +326,13 @@ def parse_arguments_object(value: Any) -> dict[str, Any] | None:
 
 
 def normalize_edit_action(value: Any) -> str:
+    """将 action 字符串标准化为已知动作名；不在合法集合中则返回 "unknown"。"""
     raw = str(value or "").strip().lower()
     return raw if raw in INTERNAL_EDIT_ACTIONS else "unknown"
 
 
 def normalize_edit_value(value: Any) -> str:
+    """将口语字符转换后标准化为单个大写车牌字符；多字符或空值返回空串。"""
     text = normalize_spoken_plate_chars(value)
     if not text:
         return ""
@@ -326,6 +341,7 @@ def normalize_edit_value(value: Any) -> str:
 
 
 def normalize_spoken_plate_chars(value: Any) -> str:
+    """将口语发音替换为对应车牌字符（如"幺"→"1"、"拐"→"7"、"圈"→"Q"）。"""
     text = clean_plate_text(value)
     for source, target in SPOKEN_PLATE_CHAR_REPLACEMENTS.items():
         text = text.replace(source, target)
@@ -333,16 +349,19 @@ def normalize_spoken_plate_chars(value: Any) -> str:
 
 
 def normalize_relation(value: Any) -> str:
+    """标准化插入关系字符串为 "before" 或 "after"，默认 "before"。"""
     raw = str(value or "").strip().lower()
     return raw if raw in {"before", "after"} else "before"
 
 
 def normalize_occurrence(value: Any) -> str:
+    """标准化出现位置字符串为 "first"/"last"/"all"；不合法则返回空串。"""
     raw = str(value or "").strip().lower()
     return raw if raw in {"first", "last", "all"} else ""
 
 
 def parse_positive_int(value: Any) -> int:
+    """解析正整数，支持阿拉伯数字和中文数字；非正整数返回 0。"""
     raw = str(value or "").strip()
     try:
         number = int(raw)
@@ -352,6 +371,7 @@ def parse_positive_int(value: Any) -> int:
 
 
 def parse_chinese_position(value: str) -> int:
+    """将中文位置文本（如"第三位"、"十二"）转换为对应整数。"""
     raw = re.sub(r"\s+", "", str(value or ""))
     raw = raw.replace("第", "").replace("位", "").replace("个", "")
     digits = {
@@ -380,10 +400,12 @@ def parse_chinese_position(value: str) -> int:
 
 
 def valid_existing_position(position: int, chars: list[str]) -> bool:
+    """检查 1-based 位置是否在字符列表的有效范围 [1, len(chars)] 内。"""
     return 1 <= position <= len(chars)
 
 
 def unique_ints(values: list[int]) -> list[int]:
+    """去重保序，过滤掉非正整数，返回有序不重复的正整数列表。"""
     result: list[int] = []
     seen: set[int] = set()
     for value in values:
@@ -395,14 +417,17 @@ def unique_ints(values: list[int]) -> list[int]:
 
 
 def clean_plate_text(value: Any) -> str:
+    """去除空白字符（edit 模块内独立定义，逻辑同 plate_agent_rules）。"""
     return re.sub(r"\s+", "", str(value or "")).strip()
 
 
 def normalize_plate_format(value: Any) -> str:
+    """去空白并转大写（edit 模块内独立定义）。"""
     return clean_plate_text(value).upper()
 
 
 def normalize_plate_text(value: Any) -> str:
+    """标准化车牌，含 G→冀（edit 模块内独立定义）。"""
     plate = normalize_plate_format(value)
     if plate.startswith("G"):
         return "冀" + plate[1:]

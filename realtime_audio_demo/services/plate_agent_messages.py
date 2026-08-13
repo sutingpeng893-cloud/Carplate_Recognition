@@ -4,7 +4,7 @@ from typing import Any
 
 from realtime_audio_demo.config import PLATE_REPLY_INCLUDE_CONFIRMATION
 from realtime_audio_demo.services.plate_agent_rules import clean_plate_text, describe_plate_char, with_relative_confusion_reasons
-from realtime_audio_demo.services.plate_agent_types import PlateAgentState
+from realtime_audio_demo.services.plate_agent_types import PlateAgentState, PlateEditCommand
 
 
 # 产品话术集中维护文件。
@@ -14,7 +14,7 @@ from realtime_audio_demo.services.plate_agent_types import PlateAgentState
 # 2. 不要修改变量名、函数名、字典 key，例如 SESSION_OPENING_TEXT、ACK_MESSAGES_BY_SCENE、initial、update。
 # 3. 带花括号的内容是后端占位符，必须保留：
 #    {plate} = 当前车牌号，{char} = 某个字符的口语说明，{pending} = 需要用户确认的位置列表。
-# 4. ACK_MESSAGES_BY_SCENE 每组 4 句话，对应立即返回、1 秒、3 秒、5 秒时的衔接语。
+# 4. ACK_MESSAGES_BY_SCENE 每组 1 句话，音频收到后立即发送一次过渡话术。
 
 # 新会话开始时返回给用户的开场白。
 # 触发位置：/api/chatbox/audio/session/start 接口。
@@ -26,24 +26,10 @@ SESSION_OPENING_TEXT = "您好，请告诉我您的车牌号。"
 # update：多轮已有暂存车牌，用户可能是在确认或纠错。
 ACK_MESSAGES_BY_SCENE = {
     "initial": (
-        # 首轮 0 秒：音频刚收到，先告诉用户系统已经开始处理。
-        "语音已收到，正在判断是否包含车牌信息。",
-        # 首轮 1 秒：模型还没返回时，提示正在识别车牌号码。
-        "正在识别车牌号码内容。",
-        # 首轮 3 秒：模型仍未返回时，提示正在结合车牌规则复核。
-        "还在结合车牌规则和发音做确认。",
-        # 首轮 5 秒：长耗时兜底衔接语，避免页面长时间无反馈。
-        "识别还在处理，请稍等。",
+        "您稍等，正在为您查询车牌。",
     ),
     "update": (
-        # 多轮 0 秒：已有暂存车牌时，先判断用户是在确认还是修改。
-        "语音已收到，正在判断您是在确认还是修改。",
-        # 多轮 1 秒：模型还没返回时，提示正在结合当前车牌处理本轮语音。
-        "正在结合当前车牌处理您的这次回复。",
-        # 多轮 3 秒：编辑 action 和二次确认列表还在复核时返回。
-        "还在复核修改结果和需要确认的位置。",
-        # 多轮 5 秒：长耗时兜底衔接语，避免页面长时间无反馈。
-        "处理还在继续，请稍等。",
+        "您稍等，正在为您更新车牌。",
     ),
 }
 
@@ -120,6 +106,54 @@ NO_PENDING_CONFIRMATION_TEMPLATE = "请您确认{plate}是否正确。"
 # 当前车牌被判断为 8 位新能源号牌时追加。
 # 典型场景：后端 vehicle_type=new_energy，需要用户确认是不是新能源车牌。
 NEW_ENERGY_CONFIRMATION_TEXT = "另外这是新能源号牌吗？"
+
+# pending action 话术：大模型识别出修改意图后追问用户是否修改。
+# {old_plate}=当前车牌，{action_desc}=修改描述，{new_plate}=预执行后车牌。
+PENDING_ACTION_CONFIRM_TEMPLATE = "当前暂存车牌是{old_plate}，识别到您要{action_desc}，修改后车牌{new_plate}，是否修改？"
+
+# pending action 话术：用户确认执行后回复。
+# {plate}=已写入的新车牌。
+PENDING_ACTION_APPLIED_TEMPLATE = "已修改为{plate}，请确认是否正确。"
+
+# pending action 话术：用户拒绝执行后回复。
+# {plate}=保留的原车牌。
+PENDING_ACTION_DISCARDED_TEMPLATE = "好的，当前保留原车牌{plate}，请继续确认或告知修改。"
+
+
+def describe_edit_command(cmd: PlateEditCommand) -> str:
+    if cmd.action == "replace_position" and cmd.position and cmd.value:
+        return f"将第{cmd.position}位替换为{cmd.value}"
+    if cmd.action == "replace_char" and cmd.old_value and cmd.value:
+        return f"将{cmd.old_value}替换为{cmd.value}"
+    if cmd.action == "insert_position" and cmd.position and cmd.value:
+        relation = "之后" if cmd.relation == "after" else "之前"
+        return f"在第{cmd.position}位{relation}插入{cmd.value}"
+    if cmd.action == "delete_position" and cmd.position:
+        return f"删除第{cmd.position}位"
+    return ""
+
+
+def describe_edit_commands(commands: list[PlateEditCommand]) -> str:
+    parts = [describe_edit_command(cmd) for cmd in commands if cmd.action not in ("none", "unknown")]
+    return "，".join(p for p in parts if p)
+
+
+def build_pending_action_confirm_reply(old_plate: str, commands: list[PlateEditCommand], new_plate: str) -> str:
+    action_desc = describe_edit_commands(commands)
+    return PENDING_ACTION_CONFIRM_TEMPLATE.format(
+        old_plate=clean_plate_text(old_plate),
+        action_desc=action_desc,
+        new_plate=clean_plate_text(new_plate),
+    )
+
+
+def build_pending_action_applied_reply(state: PlateAgentState) -> str:
+    base = PENDING_ACTION_APPLIED_TEMPLATE.format(plate=display_plate(state))
+    return with_pending_confirmation(base, state)
+
+
+def build_pending_action_discarded_reply(plate: str) -> str:
+    return PENDING_ACTION_DISCARDED_TEMPLATE.format(plate=clean_plate_text(plate))
 
 
 def build_initial_success_reply(state: PlateAgentState) -> str:

@@ -8,7 +8,7 @@ from realtime_audio_demo.services.plate_agent_messages import ACK_MESSAGES_BY_SC
 from realtime_audio_demo.services.plate_agent_types import PlateAgentState
 
 
-ACK_SCHEDULE_SECONDS = (0.0, 1.0, 3.0, 5.0)
+ACK_SCHEDULE_SECONDS = (0.0,)
 
 
 def ack_scene_for_state(state: PlateAgentState) -> str:

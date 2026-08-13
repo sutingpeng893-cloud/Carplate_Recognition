@@ -292,6 +292,7 @@ async def chatbox_audio_stream(request: Request) -> StreamingResponse:
             "speech_text": agent_result.speech_text,
             "output_is_json": True,
             "latency_ms": agent_result.latency_ms,
+            "llm_calls": agent_result.llm_calls or None,
             "saved_input_wav": str(input_path),
             "agent_state": agent_result.state.to_context(),
         }
@@ -955,6 +956,7 @@ async def finalize_session(session: AudioSession) -> None:
             "raw_response": {"agent_debug": agent_result.debug},
             "saved_input_wav": str(input_path),
             "latency_ms": agent_result.latency_ms,
+            "llm_calls": agent_result.llm_calls or None,
             "ttft_ms": None,
             "agent_state": agent_result.state.to_context(),
         },

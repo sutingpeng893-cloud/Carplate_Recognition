@@ -17,14 +17,17 @@ CONFUSION_ALNUM_CHARS = {"2", "R", "1", "E"}
 
 
 def clean_plate_text(value: Any) -> str:
+    """去除字符串中所有空白字符（空格、制表符等）并 strip。"""
     return re.sub(r"\s+", "", str(value or "")).strip()
 
 
 def normalize_plate_format(value: Any) -> str:
+    """去除空白后转全大写，是格式清洗的基础步骤。"""
     return clean_plate_text(value).upper()
 
 
 def first_char_is_ascii_letter_or_digit(value: str) -> bool:
+    """判断字符串首字符是否为 ASCII 字母或数字（用于检测省份识别失败的情况）。"""
     if not value:
         return False
     first = value[0]
@@ -32,6 +35,7 @@ def first_char_is_ascii_letter_or_digit(value: str) -> bool:
 
 
 def replace_leading_g_with_ji(value: str) -> str:
+    """若车牌首字母为 G 则替换为汉字"冀"，处理河北 G 的语音识别偏差。"""
     plate = normalize_plate_format(value)
     if plate.startswith("G"):
         return "冀" + plate[1:]
@@ -39,14 +43,17 @@ def replace_leading_g_with_ji(value: str) -> str:
 
 
 def normalize_plate_text(value: Any) -> str:
+    """标准化车牌文本入口：去空白、转大写、G→冀。"""
     return replace_leading_g_with_ji(value)
 
 
 def plate_length(car_plate: str) -> int:
+    """返回去空白后的车牌字符数。"""
     return len(clean_plate_text(car_plate))
 
 
 def vehicle_type_by_length(car_plate: str) -> str:
+    """按车牌长度判断车辆类型：7 位=fuel，8 位=new_energy，其他=unknown。"""
     length = plate_length(car_plate)
     if length == 7:
         return "fuel"
@@ -56,6 +63,7 @@ def vehicle_type_by_length(car_plate: str) -> str:
 
 
 def is_valid_plate_number(car_plate: str) -> bool:
+    """完整校验车牌格式：省份缩写 + 字母城市码 + 数字/字母 + 特殊尾字符规则，纯规则无模型。"""
     plate = normalize_plate_text(car_plate)
     if vehicle_type_by_length(plate) == "unknown":
         return False
@@ -75,6 +83,7 @@ def is_valid_plate_number(car_plate: str) -> bool:
 
 
 def detect_initial_confusions_by_rule(car_plate: str) -> list[PlateConfusion]:
+    """按固定规则扫描易混淆字符：省份混淆集（甘赣津京桂贵冀吉）和字母数字混淆集（1/E/2/R），纯规则无模型。"""
     plate = clean_plate_text(car_plate)
     confusions: list[PlateConfusion] = []
     if plate and plate[0] in CONFUSION_PROVINCE_CHARS:
@@ -86,6 +95,7 @@ def detect_initial_confusions_by_rule(car_plate: str) -> list[PlateConfusion]:
 
 
 def build_confusion(*, position: int, value: str) -> PlateConfusion:
+    """构造单个 PlateConfusion 对象，含位置、原始值和初步原因描述。"""
     return PlateConfusion(
         position=position,
         value=value,
@@ -94,6 +104,7 @@ def build_confusion(*, position: int, value: str) -> PlateConfusion:
 
 
 def with_relative_confusion_reasons(car_plate: str, confusions: list[PlateConfusion]) -> list[PlateConfusion]:
+    """为混淆列表每项补全候选字符集合，并调用 relative_confusion_reason 重新生成相对位置描述。"""
     plate = clean_plate_text(car_plate)
     normalized: list[PlateConfusion] = []
     for item in confusions:
@@ -116,6 +127,7 @@ def with_relative_confusion_reasons(car_plate: str, confusions: list[PlateConfus
 
 
 def relative_confusion_reason(car_plate: str, item: PlateConfusion) -> str:
+    """生成单个混淆位的"第 X 位当前识别为…"自然语言描述。"""
     plate = clean_plate_text(car_plate)
     index = item.position - 1
     value = item.value
@@ -128,6 +140,7 @@ def relative_confusion_reason(car_plate: str, item: PlateConfusion) -> str:
 
 
 def describe_plate_char(value: str) -> str:
+    """将车牌字符转为自然语言：省份简称用全称（如"河北的冀"），数字/字母加类型前缀。"""
     value = str(value or "")
     labels = {
         "赣": "江西的赣",
@@ -154,4 +167,5 @@ def describe_plate_char(value: str) -> str:
 
 
 def contains_absolute_position_text(value: str) -> bool:
+    """检测字符串中是否包含"第 X 位"绝对位置表述。"""
     return bool(re.search(r"第\s*[0-9一二三四五六七八九十]+\s*位", str(value or "")))

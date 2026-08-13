@@ -262,6 +262,63 @@ def build_plate_update_review_prompt(context: dict[str, Any]) -> str:
 """.strip()
 
 
+
+
+def build_classify_intent_prompt(context: dict[str, Any]) -> str:
+    """轻量级意图分类 prompt（max_tokens=16）。
+    只判断用户是确认执行、拒绝且无新意见，还是不确定/有新编辑意见。
+    输出仅为单个关键词，不含推理或 JSON 结构。
+    """
+    car_plate = str(context.get("car_plate") or "").strip()
+    pending_plate = str(context.get("pending_plate") or "").strip()
+    action_desc = str(context.get("action_desc") or "").strip()
+    previous_reply = str(context.get("previous_assistant_reply") or "").strip()
+    return f"""
+任务：上一轮 AI 询问用户是否要执行一项车牌修改。请根据用户最新语音，只判断用户的回应类型。
+
+当前暂存车牌：{car_plate}
+AI 提议的修改：{action_desc}
+修改后预计车牌：{pending_plate}
+上一轮 AI 说的话：{previous_reply}
+
+回应类型说明：
+- execute：用户明确同意，例如"对""是的""好""没错""行""执行"。
+- reject：用户明确拒绝且没有给出新的修改指令，例如"不""不对""不是""不要改""别改""不是这个"。
+- unclear：用户回应模糊，或给出了新的修改指令，或含有具体车牌字符信息。
+
+只输出以下三个词之一，不要输出其他任何内容：execute / reject / unclear
+""".strip()
+
+
+def build_classify_pending_commands_prompt(context: dict[str, Any]) -> str:
+    """重量级编辑命令提取 prompt（仅在 intent=unclear 时调用，max_tokens=128）。
+    在已知用户不是简单 execute/reject 的前提下，提取具体的编辑 action。
+    """
+    car_plate = str(context.get("car_plate") or "").strip()
+    pending_plate = str(context.get("pending_plate") or "").strip()
+    action_desc = str(context.get("action_desc") or "").strip()
+    previous_reply = str(context.get("previous_assistant_reply") or "").strip()
+    return f"""
+任务：用户拒绝了上一轮的修改建议并给出了新的修改意见，请提取用户的编辑动作。
+
+当前暂存车牌：{car_plate}
+上一轮 AI 提议的修改：{action_desc}（修改后预计车牌：{pending_plate}）
+上一轮 AI 说的话：{previous_reply}
+
+可用编辑动作：
+- replace_position：按位置替换一位。JSON：{{"action":"replace_position","position":3,"value":"R"}}
+- replace_char：按已有字符替换。JSON：{{"action":"replace_char","old_value":"临","value":"0"}}
+- insert_position：插入字符。JSON：{{"action":"insert_position","position":3,"value":"5","relation":"after"}}
+- delete_position：删除某一位。JSON：{{"action":"delete_position","position":3}}
+
+如果听清了明确的编辑意图，输出 JSON 对象，commands 列表包含编辑动作：
+{{"intent":"new_edit","commands":[{{"action":"replace_position","position":3,"value":"E"}}]}}
+
+如果没有听清明确意图，输出：
+{{"intent":"reject","commands":[]}}
+""".strip()
+
+
 def build_province_retry_prompt(formatted_plate: str) -> str:
     return f"""
 任务：当前暂时的车牌识别结果第一位不是省份简称，请根据用户音频重新识别车牌号。

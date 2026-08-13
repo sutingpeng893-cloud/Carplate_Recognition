@@ -28,6 +28,8 @@ def clone_state(state: PlateAgentState) -> PlateAgentState:
         assistant_reply=state.assistant_reply,
         ack_sent=state.ack_sent,
         turn_summaries=list(state.turn_summaries),
+        pending_plate=state.pending_plate,
+        pending_commands=list(state.pending_commands),
     )
     if cloned_state.car_plate and not cloned_state.plate_chars:
         refresh_plate_state(

@@ -20,6 +20,7 @@ CURRENT_SESSION_ID: ContextVar[str] = ContextVar("plate_agent_session_id", defau
 CURRENT_TURN_BEFORE_STATE: ContextVar[dict[str, Any] | None] = ContextVar("plate_agent_turn_before_state", default=None)
 CURRENT_USER_AUDIO_PATH: ContextVar[str] = ContextVar("plate_agent_user_audio_path", default="")
 CURRENT_AI_RAW_DIALOG: ContextVar[list[dict[str, Any]] | None] = ContextVar("plate_agent_ai_raw_dialog", default=None)
+CURRENT_LLM_CALL_TIMINGS: ContextVar[list[dict[str, Any]] | None] = ContextVar("plate_agent_llm_call_timings", default=None)
 _TRACE_LOCK = threading.Lock()
 _TRACE_FILENAMES_BY_SESSION: dict[str, str] = {}
 
@@ -50,6 +51,14 @@ def state_change_summary(before: dict[str, Any], after: dict[str, Any]) -> dict[
 
 
 def log_node_output(node: str, output: dict[str, Any]) -> None:
+    if node == "turn_result":
+        llm_calls = list(CURRENT_LLM_CALL_TIMINGS.get() or [])
+        if llm_calls:
+            output = {
+                **output,
+                "llm_calls": llm_calls,
+                "llm_total_ms": sum(c.get("duration_ms", 0) for c in llm_calls),
+            }
     before_state = output.get("before_state") or CURRENT_TURN_BEFORE_STATE.get()
     after_state = output.get("after_state") or output.get("state")
     collect_ai_raw_dialog(node, output)
@@ -149,6 +158,8 @@ def build_turn_history_record(payload: dict[str, Any], *, timestamp: str) -> dic
                 ),
                 "vehicle_type": state.get("vehicle_type"),
                 "latency_ms": output.get("latency_ms"),
+                "llm_calls": output.get("llm_calls") or None,
+                "llm_total_ms": output.get("llm_total_ms") or None,
                 "need_confirmation_count": len(state.get("need_confirm_chars") or []),
                 "confirmed_count": len(state.get("confirmed_chars") or []),
             }

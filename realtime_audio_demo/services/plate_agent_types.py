@@ -131,6 +131,8 @@ class PlateAgentState:
     assistant_reply: str = ""
     ack_sent: bool = False
     turn_summaries: list[str] = field(default_factory=list)
+    pending_plate: str = ""
+    pending_commands: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def has_car_plate(self) -> bool:
@@ -153,6 +155,8 @@ class PlateAgentState:
             "assistant_reply": self.assistant_reply,
             "ack_sent": self.ack_sent,
             "turn_summaries": list(self.turn_summaries),
+            "pending_plate": self.pending_plate,
+            "pending_commands": list(self.pending_commands),
         }
 
 
@@ -164,6 +168,7 @@ class PlateAgentResult:
     state: PlateAgentState
     latency_ms: int
     debug: dict[str, Any] = field(default_factory=dict)
+    llm_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -246,5 +251,19 @@ class PlateEditResult:
             "review": self.review.to_dict() if self.review else None,
             "steps": self.steps,
             "error": self.error,
+            "raw": self.raw,
+        }
+
+
+@dataclass(slots=True)
+class PendingResponseResult:
+    intent: str  # "execute" | "reject" | "new_edit"
+    commands: list[PlateEditCommand] = field(default_factory=list)
+    raw: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intent": self.intent,
+            "commands": [cmd.to_dict() for cmd in self.commands],
             "raw": self.raw,
         }

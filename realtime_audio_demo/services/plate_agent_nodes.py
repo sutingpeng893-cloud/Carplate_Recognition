@@ -8,8 +8,8 @@ from realtime_audio_demo.services.plate_agent_confirmation import (
     complete_confirmation_actions,
     parse_confirmation_actions,
 )
-from realtime_audio_demo.services.plate_agent_edit import apply_plate_edit_commands, parse_plate_edit_commands
-from realtime_audio_demo.services.plate_agent_logging import log_agent_line, log_node_output
+from realtime_audio_demo.services.plate_agent_edit import apply_plate_edit_commands, parse_plate_edit_command_data, parse_plate_edit_commands
+from realtime_audio_demo.services.plate_agent_logging import log_agent_line, log_node_output, CURRENT_LLM_CALL_TIMINGS
 from realtime_audio_demo.services.plate_agent_parsing import (
     elapsed_ms,
     extract_final_plate_from_text,
@@ -23,6 +23,8 @@ from realtime_audio_demo.services.plate_agent_parsing import (
     unique_positions,
 )
 from realtime_audio_demo.services.plate_agent_prompts import (
+    build_classify_intent_prompt,
+    build_classify_pending_commands_prompt,
     build_confirmation_detection_prompt_with_history,
     build_confirmation_state_action_prompt,
     build_plate_edit_command_prompt,
@@ -35,17 +37,16 @@ from realtime_audio_demo.services.plate_agent_response import (
     reply_with_pending_confirmation,
 )
 from realtime_audio_demo.services.plate_agent_messages import (
-    EDIT_MULTI_STEP_PARTIAL_REPLY,
     EDIT_UNCLEAR_REPLY,
     INVALID_PLATE_REPLY,
     build_edit_invalid_reply,
     build_fixed_reply,
+    describe_edit_commands,
 )
 from realtime_audio_demo.services.plate_agent_rules import (
     clean_plate_text,
     detect_initial_confusions_by_rule,
     first_char_is_ascii_letter_or_digit,
-    is_valid_plate_number,
     normalize_plate_format,
     normalize_plate_text,
     plate_length,
@@ -53,9 +54,7 @@ from realtime_audio_demo.services.plate_agent_rules import (
     vehicle_type_by_length,
 )
 from realtime_audio_demo.services.plate_agent_state import (
-    clone_state,
     extract_batch_commands,
-    refresh_plate_state,
 )
 from realtime_audio_demo.services.plate_agent_types import (
     PlateAgentResult,
@@ -64,6 +63,7 @@ from realtime_audio_demo.services.plate_agent_types import (
     PlateConfusion,
     PlateEditResult,
     PlateUpdateReview,
+    PendingResponseResult,
 )
 
 
@@ -77,6 +77,7 @@ class PlateAgentNodesMixin:
         debug: dict[str, Any],
         stage: str,
     ) -> PlateAgentResult:
+        """构造车牌格式不合法时的结果对象，清空 state 中所有车牌字段并返回 invalid 状态，无模型调用。"""
         output = build_output_json(
             task_status="invalid",
             car_plate=car_plate,
@@ -124,6 +125,7 @@ class PlateAgentNodesMixin:
             state=working,
             latency_ms=latency_ms,
             debug=result_debug,
+            llm_calls=list(CURRENT_LLM_CALL_TIMINGS.get() or []),
         )
 
     def build_invalid_update_result(
@@ -135,6 +137,7 @@ class PlateAgentNodesMixin:
         debug: dict[str, Any],
         stage: str,
     ) -> PlateAgentResult:
+        """构造更新后车牌不合法的结果对象，保留原有车牌并返回 need_confirmation 状态，无模型调用。"""
         assistant_reply = build_edit_invalid_reply(working)
         working.confirmed = False
         working.final_car_plate = ""
@@ -177,6 +180,7 @@ class PlateAgentNodesMixin:
             state=working,
             latency_ms=latency_ms,
             debug=result_debug,
+            llm_calls=list(CURRENT_LLM_CALL_TIMINGS.get() or []),
         )
 
     async def refresh_confusions_after_audio(
@@ -187,6 +191,7 @@ class PlateAgentNodesMixin:
         working: PlateAgentState,
         confirmed_positions: list[int] | None = None,
     ) -> list[PlateConfusion]:
+        """刷新易混淆位列表：先规则扫描，再调用 detect_confirmation_state_actions（调用大模型）输出确认状态 action，最后原地更新 state。"""
         previous_confirmed_positions = {
             item.position for item in working.confirmed_chars if item.confirmed and item.position > 0
         }
@@ -228,22 +233,26 @@ class PlateAgentNodesMixin:
         return confusions
 
     async def detect_plate_presence(self, *, model: str, wav_bytes: bytes) -> bool:
+        """调用大模型判断音频中是否含有车牌信息，返回 bool（max_tokens=8）。"""
         result = await self.audio_call(
             model=model,
             wav_bytes=wav_bytes,
             prompt=build_plate_presence_prompt(),
             max_tokens=8,
+            node="detect_plate_presence",
         )
         has_plate = parse_bool_text(result, default=False)
         log_node_output("detect_plate_presence", {"raw": result, "has_plate": has_plate})
         return has_plate
 
     async def extract_car_plate(self, *, model: str, wav_bytes: bytes) -> str:
+        """两阶段提取车牌：第一步调用大模型提取原始文本，第二步调用 normalize_plate_result 做省份归一化（可能再次调用大模型）。"""
         extraction_result = await self.audio_call(
             model=model,
             wav_bytes=wav_bytes,
             prompt=CAR_PLATE_EXTRACTION_PROMPT,
             max_tokens=1024,
+            node="extract_car_plate",
         )
         log_agent_line("首轮模型推理是什么", 模型输出=extraction_result)
         summarized_raw = extract_final_plate_from_text(extraction_result)
@@ -290,6 +299,7 @@ class PlateAgentNodesMixin:
         rule_confusions: list[PlateConfusion],
         confirmed_positions: list[int],
     ) -> list[PlateConfirmationAction]:
+        """调用大模型输出确认状态 action 列表（max_tokens=512），再与规则混淆结果合并补全，返回最终 action 列表。"""
         plate = clean_plate_text(state.car_plate)
         context = {
             "car_plate": plate,
@@ -308,6 +318,7 @@ class PlateAgentNodesMixin:
             wav_bytes=wav_bytes,
             prompt=build_confirmation_state_action_prompt(context),
             max_tokens=512,
+            node="detect_confirmation_state_actions",
         )
         model_actions = parse_confirmation_actions(raw)
         actions = complete_confirmation_actions(
@@ -338,12 +349,14 @@ class PlateAgentNodesMixin:
         return actions
 
     async def detect_confirmation(self, *, model: str, wav_bytes: bytes, state: PlateAgentState) -> bool:
+        """调用大模型判断用户是否在整体确认当前车牌，输出 yes/no（max_tokens=8），返回 bool。"""
         previous_ai_reply = (state.assistant_reply or "").strip()
         result = await self.audio_call(
             model=model,
             wav_bytes=wav_bytes,
             prompt=build_confirmation_detection_prompt_with_history(previous_ai_reply, state.turn_summaries),
             max_tokens=8,
+            node="detect_confirmation",
         )
         confirmed = parse_yes_no(result, default=False)
         log_context = {
@@ -360,156 +373,127 @@ class PlateAgentNodesMixin:
         if not current_plate:
             return PlateEditResult(car_plate="", changed=False, error=EDIT_UNCLEAR_REPLY)
 
-        tentative_state = clone_state(state)
-        tentative_plate = current_plate
-        steps: list[dict[str, Any]] = []
-        changed_positions: list[int] = []
-        final_result: PlateEditResult | None = None
-
-        for step_index in range(1, 4):
-            command_result = await self.audio_call(
-                model=model,
-                wav_bytes=wav_bytes,
-                prompt=build_plate_edit_command_prompt(
-                    tentative_state,
-                    current_plate=tentative_plate,
-                    edit_steps=steps,
-                ),
-                max_tokens=1024,
-            )
-            commands = parse_plate_edit_commands(command_result)
-            command = commands[0]
-            log_agent_line(
-                "多轮纠错：模型推理是什么",
-                第几轮=step_index,
-                当前车牌=tentative_plate,
-                模型输出=command_result,
-            )
-            log_agent_line(
-                "多轮纠错：action 是什么",
-                第几轮=step_index,
-                actions=[item.to_dict() for item in commands],
-                说明="后端会按 actions 顺序执行；单个修改时 actions 只有一项。",
-            )
-            log_node_output(
-                "update_car_plate.react_action",
-                {
-                    "step": step_index,
-                    "raw": command_result,
-                    "previous_state": state.to_context(),
-                    "tentative_state": tentative_state.to_context(),
-                    "input_plate": tentative_plate,
-                    "command": command.to_dict(),
-                    "commands": [item.to_dict() for item in commands],
-                },
-            )
-            edit_result = apply_plate_edit_commands(tentative_plate, commands)
-            edit_result.raw = command_result
-            log_agent_line(
-                "多轮纠错：action 执行结果",
-                第几轮=step_index,
-                执行前车牌=tentative_plate,
-                执行后车牌=edit_result.car_plate,
-                是否修改=edit_result.changed,
-                修改位置=edit_result.changed_positions,
-                错误信息=edit_result.error,
-            )
-            log_node_output(
-                "update_car_plate.edit_result",
-                {
-                    "step": step_index,
-                    "input_plate": tentative_plate,
-                    "command": command.to_dict(),
-                    "commands": [item.to_dict() for item in commands],
-                    "edit_result": edit_result.to_dict(),
-                },
-            )
-            review = await self.review_plate_update(
-                model=model,
-                wav_bytes=wav_bytes,
-                state=state,
-                before_plate=tentative_plate,
-                edit_result=edit_result,
-                steps=steps,
-            )
-            edit_result.review = review
-            step = {
-                "step": step_index,
-                "input_plate": tentative_plate,
+        command_result = await self.audio_call(
+            model=model,
+            wav_bytes=wav_bytes,
+            prompt=build_plate_edit_command_prompt(
+                state,
+                current_plate=current_plate,
+                edit_steps=[],
+            ),
+            max_tokens=1024,
+            node="update_car_plate.edit_command",
+        )
+        commands = parse_plate_edit_commands(command_result)
+        command = commands[0]
+        log_agent_line(
+            "多轮纠错：模型推理是什么",
+            当前车牌=current_plate,
+            模型输出=command_result,
+        )
+        log_agent_line(
+            "多轮纠错：action 是什么",
+            actions=[item.to_dict() for item in commands],
+            说明="后端会按 actions 顺序执行；单个修改时 actions 只有一项。",
+        )
+        log_node_output(
+            "update_car_plate.action",
+            {
                 "raw": command_result,
+                "previous_state": state.to_context(),
+                "input_plate": current_plate,
+                "command": command.to_dict(),
+                "commands": [item.to_dict() for item in commands],
+            },
+        )
+        edit_result = apply_plate_edit_commands(current_plate, commands)
+        edit_result.raw = command_result
+        log_agent_line(
+            "多轮纠错：action 执行结果",
+            执行前车牌=current_plate,
+            执行后车牌=edit_result.car_plate,
+            是否修改=edit_result.changed,
+            修改位置=edit_result.changed_positions,
+            错误信息=edit_result.error,
+        )
+        log_node_output(
+            "update_car_plate.edit_result",
+            {
+                "input_plate": current_plate,
                 "command": command.to_dict(),
                 "commands": [item.to_dict() for item in commands],
                 "edit_result": edit_result.to_dict(),
-                "review": review.to_dict(),
-            }
-            steps.append(step)
+            },
+        )
+        return edit_result
+
+    async def classify_pending_response(
+        self,
+        *,
+        model: str,
+        wav_bytes: bytes,
+        state: PlateAgentState,
+    ) -> PendingResponseResult:
+        """两阶段意图分类：
+        1. 轻量级调用（max_tokens=16）判断 execute / reject / unclear。
+        2. 仅当 unclear 时触发重量级调用（max_tokens=128）提取编辑命令。
+        execute 和 reject 只需1次 LLM 调用；new_edit 需要 2 次。
+        """
+        action_desc = describe_edit_commands(
+            [parse_plate_edit_command_data(cmd) for cmd in state.pending_commands if isinstance(cmd, dict)]
+        )
+        context = {
+            "car_plate": state.car_plate,
+            "pending_plate": state.pending_plate,
+            "action_desc": action_desc,
+            "previous_assistant_reply": state.assistant_reply,
+        }
+
+        # ── 第一阶段：轻量级意图分类（max_tokens=16）──
+        intent_raw = await self.audio_call(
+            model=model,
+            wav_bytes=wav_bytes,
+            prompt=build_classify_intent_prompt(context),
+            max_tokens=16,
+            node="classify_intent",
+        )
+        intent_text = intent_raw.strip().lower()
+        log_agent_line("等待确认轮：轻量级意图分类", 模型输出=intent_raw, 解析结果=intent_text)
+        log_node_output(
+            "classify_intent",
+            {"raw": intent_raw, "intent_text": intent_text, "context": context},
+        )
+
+        if intent_text in ("execute", "reject"):
+            # 快速路径：无需第二次调用
+            result = PendingResponseResult(intent=intent_text, commands=[], raw=intent_raw)
             log_node_output(
-                "update_car_plate.react_step_done",
-                {
-                    "step": step_index,
-                    "previous_state": state.to_context(),
-                    "tentative_state": tentative_state.to_context(),
-                    "command": command.to_dict(),
-                    "commands": [item.to_dict() for item in commands],
-                    "edit_result": edit_result.to_dict(),
-                    "review": review.to_dict(),
-                },
+                "classify_pending_response",
+                {"fast_path": True, "raw": intent_raw, "context": context, "result": result.to_dict()},
             )
+            return result
 
-            if not review.valid_result:
-                return PlateEditResult(
-                    car_plate=current_plate,
-                    changed=False,
-                    command=command,
-                    changed_positions=unique_positions([*changed_positions, *review.confirmed_positions]),
-                    review=review,
-                    steps=steps,
-                    error=EDIT_UNCLEAR_REPLY,
-                    raw=command_result,
-                )
-
-            changed_positions = unique_positions(
-                [*changed_positions, *edit_result.changed_positions, *review.confirmed_positions]
-            )
-
-            if edit_result.changed:
-                tentative_plate = edit_result.car_plate
-                if not is_valid_plate_number(tentative_plate):
-                    edit_result.changed_positions = changed_positions
-                    edit_result.steps = steps
-                    return edit_result
-                refresh_plate_state(
-                    tentative_state,
-                    tentative_plate,
-                    confusions=[],
-                    confirmed=False,
-                    preserve_confirmed=True,
-                )
-                apply_confirmation_actions(
-                    tentative_state,
-                    [
-                        PlateConfirmationAction(action="add_confirmed", position=position)
-                        for position in changed_positions
-                    ],
-                    source="update_car_plate.tentative_confirmed_positions",
-                )
-
-            edit_result.car_plate = tentative_plate
-            edit_result.changed_positions = changed_positions
-            edit_result.steps = steps
-            final_result = edit_result
-
-            if not review.needs_more_edit:
-                return edit_result
-
-            if all(item.action in {"none", "unknown"} for item in commands) or not edit_result.changed:
-                edit_result.error = edit_result.error or EDIT_UNCLEAR_REPLY
-                return edit_result
-
-        if final_result is not None:
-            final_result.error = final_result.error or EDIT_MULTI_STEP_PARTIAL_REPLY
-            return final_result
-        return PlateEditResult(car_plate=current_plate, changed=False, error=EDIT_UNCLEAR_REPLY)
+        # ── 第二阶段：重量级调用提取编辑命令（max_tokens=128）──
+        commands_raw = await self.audio_call(
+            model=model,
+            wav_bytes=wav_bytes,
+            prompt=build_classify_pending_commands_prompt(context),
+            max_tokens=128,
+            node="classify_pending_commands",
+        )
+        log_agent_line("等待确认轮：提取编辑命令", 模型输出=commands_raw)
+        data = parse_json_object(commands_raw)
+        intent = str(data.get("intent") or "").strip()
+        if intent not in ("execute", "reject", "new_edit"):
+            intent = "reject"
+        commands_list = data.get("commands")
+        commands = parse_plate_edit_commands(commands_list) if isinstance(commands_list, list) and commands_list else []
+        result = PendingResponseResult(intent=intent, commands=commands, raw=commands_raw)
+        log_node_output(
+            "classify_pending_response",
+            {"fast_path": False, "raw": commands_raw, "context": context, "result": result.to_dict()},
+        )
+        return result
 
     async def review_plate_update(
         self,
@@ -521,6 +505,7 @@ class PlateAgentNodesMixin:
         edit_result: PlateEditResult,
         steps: list[dict[str, Any]],
     ) -> PlateUpdateReview:
+        """调用大模型对单步编辑结果复核（max_tokens=256），输出 confirmed_positions、needs_more_edit、valid_result。"""
         after_plate = normalize_plate_text(edit_result.car_plate or before_plate)
         context = {
             "previous_state": state.to_context(),
@@ -537,6 +522,7 @@ class PlateAgentNodesMixin:
             wav_bytes=wav_bytes,
             prompt=build_plate_update_review_prompt(context),
             max_tokens=256,
+            node="review_plate_update",
         )
         log_agent_line(
             "多轮纠错：review 模型推理是什么",
@@ -577,6 +563,7 @@ class PlateAgentNodesMixin:
         car_plate: str,
         node: str,
     ) -> str:
+        """若提取车牌首字符为 ASCII 字母/数字（省份识别失败），则条件性调用大模型重试省份识别（max_tokens=128）；最后执行 G→冀 兜底替换。"""
         formatted_plate = normalize_plate_format(sanitize_extracted_plate_text(car_plate))
         corrected_plate = formatted_plate
         retry_raw = ""
@@ -587,6 +574,7 @@ class PlateAgentNodesMixin:
                 wav_bytes=wav_bytes,
                 prompt=build_province_retry_prompt(formatted_plate),
                 max_tokens=128,
+                node="normalize_plate_result",
             )
             retry_plate = normalize_plate_format(extract_plate_from_json_object(parse_json_object(retry_raw)))
             if retry_plate:
@@ -606,6 +594,7 @@ class PlateAgentNodesMixin:
         return final_plate
 
     async def generate_reply(self, *, model: str, state: PlateAgentState, changed: bool, scene: str = "") -> str:
+        """根据当前 state 和 scene 标记生成固定模板回复文本，不调用大模型。"""
         reply = build_fixed_reply(state, changed=changed, scene=scene)
         log_node_output(
             "generate_reply",

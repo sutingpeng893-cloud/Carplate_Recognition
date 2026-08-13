@@ -102,8 +102,8 @@ def test_session_turns_stream(
             server_latency = result_data.get("latency_ms", 0)
             agent_state = result_data.get("agent_state", {})
             
-            # 延迟计算逻辑：有 Ack 用 Ack，没有 Ack 用 Result
-            latency_ms = ack_time_ms if ack_time_ms is not None else result_time_ms
+            # 与服务端日志 latency_ms 含义一致：服务端自报的处理耗时，不含网络 RTT
+            latency_ms = result_data.get("latency_ms", 0)
             
             results.append({
                 "session_id": session_id,
@@ -114,7 +114,7 @@ def test_session_turns_stream(
                 "server_latency_ms": server_latency,
                 "ack_time_ms": ack_time_ms,
                 "result_time_ms": result_time_ms,
-                "latency_ms": latency_ms,  # 最终延迟（Ack 或 Result）
+                "latency_ms": latency_ms,  # 与服务端日志一致：服务端自报处理耗时，不含网络RTT
                 "ack_to_result_gap_ms": (result_time_ms - ack_time_ms) if ack_time_ms and result_time_ms else None,
                 "car_plate": agent_state.get("car_plate", ""),
                 "final_car_plate": agent_state.get("final_car_plate", ""),
