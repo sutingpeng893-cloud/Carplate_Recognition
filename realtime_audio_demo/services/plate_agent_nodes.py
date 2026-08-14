@@ -484,7 +484,7 @@ class PlateAgentNodesMixin:
         log_agent_line("等待确认轮：提取编辑命令", 模型输出=commands_raw)
         data = parse_json_object(commands_raw)
         intent = str(data.get("intent") or "").strip()
-        if intent not in ("execute", "reject", "new_edit"):
+        if intent not in ("execute", "reject", "new_edit", "execute_with_new_edit"):
             intent = "reject"
         commands_list = data.get("commands")
         commands = parse_plate_edit_commands(commands_list) if isinstance(commands_list, list) and commands_list else []

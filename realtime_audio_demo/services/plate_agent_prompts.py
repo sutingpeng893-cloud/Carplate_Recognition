@@ -46,9 +46,19 @@ def build_plate_edit_command_prompt(
 可用编辑动作：
 - replace_position：按位置替换一位。例：第 3 位改成 R。JSON：{{"action":"replace_position","position":3,"value":"R"}}
 - replace_char：按已有字符替换。例：把临改成 0。JSON：{{"action":"replace_char","old_value":"临","value":"0"}}
+  replace_char 支持 occurrence 字段指定第几次出现：{{"action":"replace_char","old_value":"1","value":"E","occurrence":2}}
 - insert_position：在某一位前面或后面加字符。例：第 3 位后面加 5。JSON：{{"action":"insert_position","position":3,"value":"5","relation":"after"}}
 - delete_position：删除某一位。例：删掉最后一位。JSON：{{"action":"delete_position","position":{len(plate)}}}
 - none：用户只是确认，或者听不出明确修改。JSON：{{"action":"none"}}
+
+【重要】用户说法区分规则：
+- "第X位" 或 "第X个字符"（未指定具体字符内容）→ 绝对位置，用 replace_position，position=X
+- "第X个Y" / "第X个数字Y" / "第X个字母Y"（明确说了是哪个字符Y）→ 车牌中第X次出现的字符Y，用 replace_char，old_value=Y，occurrence=X（后端自动定位，不要自己数绝对位置）
+  例：赣A112R7B，"第二个1改成E" → {{"action":"replace_char","old_value":"1","value":"E","occurrence":2}}（不是 replace_position, position=2）
+  例：赣A112R7B，"第二位改成E" → {{"action":"replace_position","position":2,"value":"E"}}（即字母A）
+- 用户说"不是旧串是新串"/"应该是新串"等整体纠正 → 用 replace_substring，不要自己计算位置，后端精确 diff
+  例：车牌 京A5569B，"不是5569是5669" → {{"action":"replace_substring","old_value":"5569","new_value":"5669"}}
+  例：车牌 京A11234B，"不是11234是12234" → {{"action":"replace_substring","old_value":"11234","new_value":"12234"}}
 
 如果用户一次说了多个明确修改，最后输出 actions 列表，例如：
 {{"actions":[{{"action":"replace_position","position":3,"value":"R"}},{{"action":"delete_position","position":{len(plate)}}}]}}
@@ -292,14 +302,14 @@ AI 提议的修改：{action_desc}
 
 def build_classify_pending_commands_prompt(context: dict[str, Any]) -> str:
     """重量级编辑命令提取 prompt（仅在 intent=unclear 时调用，max_tokens=128）。
-    在已知用户不是简单 execute/reject 的前提下，提取具体的编辑 action。
+    在已知用户不是简单 execute/reject 的前提下，判断用户是否同意此次修改，并提取新的编辑 action。
     """
     car_plate = str(context.get("car_plate") or "").strip()
     pending_plate = str(context.get("pending_plate") or "").strip()
     action_desc = str(context.get("action_desc") or "").strip()
     previous_reply = str(context.get("previous_assistant_reply") or "").strip()
     return f"""
-任务：用户拒绝了上一轮的修改建议并给出了新的修改意见，请提取用户的编辑动作。
+任务：上一轮 AI 询问用户是否执行某项车牌修改，用户的回应不是简单的是/否。请判断用户是否同意执行此次修改，并提取用户是否还给出了新的编辑意见。
 
 当前暂存车牌：{car_plate}
 上一轮 AI 提议的修改：{action_desc}（修改后预计车牌：{pending_plate}）
@@ -308,13 +318,24 @@ def build_classify_pending_commands_prompt(context: dict[str, Any]) -> str:
 可用编辑动作：
 - replace_position：按位置替换一位。JSON：{{"action":"replace_position","position":3,"value":"R"}}
 - replace_char：按已有字符替换。JSON：{{"action":"replace_char","old_value":"临","value":"0"}}
+  replace_char 支持 occurrence 字段指定第几次出现：{{"action":"replace_char","old_value":"1","value":"E","occurrence":2}}
 - insert_position：插入字符。JSON：{{"action":"insert_position","position":3,"value":"5","relation":"after"}}
 - delete_position：删除某一位。JSON：{{"action":"delete_position","position":3}}
 
-如果听清了明确的编辑意图，输出 JSON 对象，commands 列表包含编辑动作：
+【重要】用户说法区分规则：
+- "第X位" 或 "第X个字符"（未指定具体字符内容）→ 绝对位置，用 replace_position，position=X
+- "第X个Y" / "第X个数字Y" / "第X个字母Y"（明确说了是哪个字符Y）→ 车牌中第X次出现的字符Y，用 replace_char，old_value=Y，occurrence=X
+  例：车牌 赣A112R7B，"第二个1改成E" → {{"action":"replace_char","old_value":"1","value":"E","occurrence":2}}
+
+输出规则（只能输出以下三种 JSON 之一）：
+
+1. 用户同意执行此次修改，并且同时给出了新的修改意见（例如"嗯，还有第X位改成Y"、"对，然后再把X改成Y"）：
+{{"intent":"execute_with_new_edit","commands":[{{"action":"replace_position","position":3,"value":"E"}}]}}
+
+2. 用户给出了新的修改意见，但未明确同意此次修改：
 {{"intent":"new_edit","commands":[{{"action":"replace_position","position":3,"value":"E"}}]}}
 
-如果没有听清明确意图，输出：
+3. 用户没有给出明确意见，或意图不明：
 {{"intent":"reject","commands":[]}}
 """.strip()
 

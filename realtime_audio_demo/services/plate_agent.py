@@ -296,24 +296,32 @@ class PlateAgentService(PlateAgentNodesMixin):
                 return PlateAgentResult(text=output, history_text=output, speech_text=assistant_reply, state=working, latency_ms=latency_ms, debug=debug, llm_calls=list(CURRENT_LLM_CALL_TIMINGS.get() or []))
 
             # B3：用户拒绝执行并给出新修改意见 → 清空旧 pending，预执行新 action
-            log_agent_line("B3：用户给出新修改意见，预执行", 新actions=[cmd.to_dict() for cmd in pending_response.commands])
+            # B4：用户同意执行并同时给出新修改意见 → 先执行 pending，再设置新 pending
+            is_execute_with_new = pending_response.intent == "execute_with_new_edit"
+            if is_execute_with_new:
+                log_agent_line("B4：用户同意执行并追加新修改意见，先执行pending", pending车牌=working.pending_plate, 新actions=[cmd.to_dict() for cmd in pending_response.commands])
+                working.car_plate = working.pending_plate
+                new_confusions = detect_initial_confusions_by_rule(working.car_plate)
+                refresh_plate_state(working, working.car_plate, confusions=new_confusions, confirmed=False, preserve_confirmed=True)
+                apply_confirmation_actions(working, confirmation_actions_from_confusions(new_confusions), source="pending_executed_rule_confusions")
+                working.final_car_plate = ""
+            else:
+                log_agent_line("B3：用户给出新修改意见，预执行", 新actions=[cmd.to_dict() for cmd in pending_response.commands])
             working.pending_plate = ""
             working.pending_commands = []
             if pending_response.commands:
                 new_edit_result = apply_plate_edit_commands(working.car_plate, pending_response.commands)
                 if new_edit_result.changed and is_valid_plate_number(new_edit_result.car_plate):
-                    # B3-2：新修改合规 → 保存新 pending，追问
                     new_plate = new_edit_result.car_plate
                     working.pending_plate = new_plate
                     working.pending_commands = [cmd.to_dict() for cmd in pending_response.commands]
                     assistant_reply = build_pending_action_confirm_reply(working.car_plate, pending_response.commands, new_plate)
                 elif new_edit_result.changed:
-                    # B3-1：新修改不合规
                     assistant_reply = build_edit_invalid_reply(working)
                 else:
                     assistant_reply = new_edit_result.error or EDIT_UNCLEAR_REPLY
             else:
-                assistant_reply = EDIT_UNCLEAR_REPLY
+                assistant_reply = build_pending_action_applied_reply(working) if is_execute_with_new else EDIT_UNCLEAR_REPLY
             working.assistant_reply = assistant_reply
             output = build_output_json(task_status="need_confirmation", car_plate=working.car_plate, assistant_reply=assistant_reply)
             latency_ms = elapsed_ms(started)

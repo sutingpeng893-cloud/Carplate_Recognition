@@ -14,7 +14,7 @@ from realtime_audio_demo.services.plate_agent_messages import (
 from realtime_audio_demo.services.plate_agent_types import PlateEditCommand, PlateEditResult
 
 
-MODEL_EDIT_ACTIONS = {"replace_position", "replace_char", "insert_position", "delete_position", "none"}
+MODEL_EDIT_ACTIONS = {"replace_position", "replace_char", "insert_position", "delete_position", "replace_substring", "none"}
 INTERNAL_EDIT_ACTIONS = MODEL_EDIT_ACTIONS | {"unknown"}
 SPOKEN_PLATE_CHAR_REPLACEMENTS = {
     "零": "0",
@@ -114,21 +114,25 @@ def parse_plate_edit_command_data(data: dict[str, Any]) -> PlateEditCommand:
         position=parse_positive_int(data.get("position") or data.get("index") or data.get("target_position") or data.get("anchor_position")),
         value=normalize_edit_value(
             data.get("value")
-            or data.get("new_value")
             or data.get("new_char")
             or data.get("char")
             or data.get("insert_value")
             or data.get("replacement")
         ),
-        old_value=normalize_edit_value(
-            data.get("old_value")
-            or data.get("old_char")
-            or data.get("target_value")
-            or data.get("target_char")
-            or data.get("source_value")
-            or data.get("source_char")
-            or data.get("from")
+        old_value=(
+            normalize_plate_text(data.get("old_value") or "")
+            if data.get("action") == "replace_substring"
+            else normalize_edit_value(
+                data.get("old_value")
+                or data.get("old_char")
+                or data.get("target_value")
+                or data.get("target_char")
+                or data.get("source_value")
+                or data.get("source_char")
+                or data.get("from")
+            )
         ),
+        new_value=normalize_plate_text(data.get("new_value") or ""),
         relation=normalize_relation(data.get("relation") or data.get("where")),
         occurrence=normalize_occurrence(data.get("occurrence") or data.get("which")),
         raw=data,
@@ -178,6 +182,9 @@ def apply_plate_edit_command(current_plate: str, command: PlateEditCommand) -> P
             return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
         del chars[command.position - 1]
         return edit_success(chars, command, changed_positions=[])
+
+    if action == "replace_substring":
+        return apply_replace_substring(plate, command)
 
     return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
 
@@ -255,8 +262,55 @@ def apply_plate_edit_commands(current_plate: str, commands: list[PlateEditComman
     )
 
 
+def apply_replace_substring(plate: str, command: PlateEditCommand) -> PlateEditResult:
+    """用户提供旧串和新串时，精确计算字符级 diff 并执行替换，避免 LLM 在重复字符中定位漂移。
+    等长时做字符级 diff；不等长时做整串替换，合法性由上层 is_valid_plate_number 校验。
+    """
+    old_val = normalize_plate_text(command.old_value or "")
+    new_val = normalize_plate_text(command.new_value or "")
+    if not old_val or not new_val:
+        return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
+
+    # 在车牌中定位旧串（已统一大写）
+    start = plate.find(old_val)
+    if start == -1:
+        return edit_error(plate, command, build_char_not_found_reply(old_val))
+    if plate.find(old_val, start + 1) != -1:
+        return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
+
+    if len(old_val) == len(new_val):
+        # 等长：字符级 diff，精确定位变动位置
+        chars = list(plate)
+        changed_positions: list[int] = []
+        for offset, (old_ch, new_ch) in enumerate(zip(old_val, new_val)):
+            if old_ch != new_ch:
+                abs_pos = start + offset
+                chars[abs_pos] = new_ch
+                changed_positions.append(abs_pos + 1)
+        if not changed_positions:
+            return PlateEditResult(
+                car_plate=plate,
+                changed=False,
+                command=command,
+                error=build_keep_current_plate_reply(plate),
+            )
+        return edit_success(chars, command, changed_positions=changed_positions)
+
+    # 不等长：整串替换，合法性交由上层 is_valid_plate_number 校验
+    new_plate = plate[:start] + new_val + plate[start + len(old_val):]
+    changed_positions = list(range(start + 1, start + len(new_val) + 1))
+    if new_plate == plate:
+        return PlateEditResult(
+            car_plate=plate,
+            changed=False,
+            command=command,
+            error=build_keep_current_plate_reply(plate),
+        )
+    return edit_success(list(new_plate), command, changed_positions=changed_positions)
+
+
 def apply_replace_char(plate: str, chars: list[str], command: PlateEditCommand) -> PlateEditResult:
-    """按旧字符值查找并替换为新字符，支持 first/last/all 三种出现位置模式。"""
+    """按旧字符值查找并替换为新字符，支持 first/last/all/N（第N次出现）四种模式。"""
     if not command.old_value or not command.value:
         return edit_error(plate, command, EDIT_UNCLEAR_REPLY)
     indexes = [index for index, char in enumerate(chars) if char == command.old_value]
@@ -267,6 +321,17 @@ def apply_replace_char(plate: str, chars: list[str], command: PlateEditCommand) 
         for index in indexes:
             chars[index] = command.value
         return edit_success(chars, command, changed_positions=changed_positions)
+    # 整数序号：第N次出现（1-based）
+    try:
+        nth = int(command.occurrence)
+        if nth > 0:
+            if nth > len(indexes):
+                return edit_error(plate, command, build_char_not_found_reply(command.old_value))
+            index = indexes[nth - 1]
+            chars[index] = command.value
+            return edit_success(chars, command, changed_positions=[index + 1])
+    except (TypeError, ValueError):
+        pass
     if len(indexes) > 1 and command.occurrence not in {"first", "last"}:
         return edit_error(plate, command, build_duplicate_char_reply(command.old_value))
     index = indexes[0] if command.occurrence != "last" else indexes[-1]
@@ -355,9 +420,17 @@ def normalize_relation(value: Any) -> str:
 
 
 def normalize_occurrence(value: Any) -> str:
-    """标准化出现位置字符串为 "first"/"last"/"all"；不合法则返回空串。"""
+    """标准化出现位置字符串为 "first"/"last"/"all" 或正整数字符串；不合法则返回空串。"""
     raw = str(value or "").strip().lower()
-    return raw if raw in {"first", "last", "all"} else ""
+    if raw in {"first", "last", "all"}:
+        return raw
+    try:
+        n = int(raw)
+        if n > 0:
+            return str(n)
+    except (TypeError, ValueError):
+        pass
+    return ""
 
 
 def parse_positive_int(value: Any) -> int:
@@ -373,7 +446,7 @@ def parse_positive_int(value: Any) -> int:
 def parse_chinese_position(value: str) -> int:
     """将中文位置文本（如"第三位"、"十二"）转换为对应整数。"""
     raw = re.sub(r"\s+", "", str(value or ""))
-    raw = raw.replace("第", "").replace("位", "").replace("个", "")
+    raw = raw.replace("第", "").replace("位", "")
     digits = {
         "一": 1,
         "二": 2,

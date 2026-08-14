@@ -43,7 +43,7 @@ INVALID_PLATE_REPLY = "您好，您当前的车牌号并不是有效号码，请
 
 # 多轮纠错时，模型没有形成可执行编辑动作时返回。
 # 典型场景：用户只说“不对”、没有说明改哪一位，或者语音太模糊。
-EDIT_UNCLEAR_REPLY = "我没有听清您要修改车牌的哪一处，当前仍保留原来的车牌。请您说明要替换、插入或删除哪一位。"
+EDIT_UNCLEAR_REPLY = "我没有听清您要修改车牌的哪一处，当前仍保留原来的车牌{plate}。请您说明要替换、插入或删除哪一位。"
 
 # 多轮纠错执行后，新车牌不符合格式时返回。
 # {plate} 必须保留，后端会替换成当前保留的旧车牌。
@@ -109,7 +109,7 @@ NEW_ENERGY_CONFIRMATION_TEXT = "另外这是新能源号牌吗？"
 
 # pending action 话术：大模型识别出修改意图后追问用户是否修改。
 # {old_plate}=当前车牌，{action_desc}=修改描述，{new_plate}=预执行后车牌。
-PENDING_ACTION_CONFIRM_TEMPLATE = "当前暂存车牌是{old_plate}，识别到您要{action_desc}，修改后车牌{new_plate}，是否修改？"
+PENDING_ACTION_CONFIRM_TEMPLATE = "识别到您要{action_desc}，是否先执行这一步？"
 
 # pending action 话术：用户确认执行后回复。
 # {plate}=已写入的新车牌。
@@ -130,6 +130,8 @@ def describe_edit_command(cmd: PlateEditCommand) -> str:
         return f"在第{cmd.position}位{relation}插入{cmd.value}"
     if cmd.action == "delete_position" and cmd.position:
         return f"删除第{cmd.position}位"
+    if cmd.action == "replace_substring" and cmd.old_value and cmd.new_value:
+        return f"将{cmd.old_value}改为{cmd.new_value}"
     return ""
 
 
@@ -138,13 +140,9 @@ def describe_edit_commands(commands: list[PlateEditCommand]) -> str:
     return "，".join(p for p in parts if p)
 
 
-def build_pending_action_confirm_reply(old_plate: str, commands: list[PlateEditCommand], new_plate: str) -> str:
+def build_pending_action_confirm_reply(old_plate: str, commands: list[PlateEditCommand], new_plate: str) -> str:  # noqa: ARG001
     action_desc = describe_edit_commands(commands)
-    return PENDING_ACTION_CONFIRM_TEMPLATE.format(
-        old_plate=clean_plate_text(old_plate),
-        action_desc=action_desc,
-        new_plate=clean_plate_text(new_plate),
-    )
+    return PENDING_ACTION_CONFIRM_TEMPLATE.format(action_desc=action_desc)
 
 
 def build_pending_action_applied_reply(state: PlateAgentState) -> str:

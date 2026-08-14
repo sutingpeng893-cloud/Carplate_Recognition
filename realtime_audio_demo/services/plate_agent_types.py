@@ -177,6 +177,7 @@ class PlateEditCommand:
     position: int = 0
     value: str = ""
     old_value: str = ""
+    new_value: str = ""
     relation: str = "at"
     occurrence: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
@@ -187,6 +188,7 @@ class PlateEditCommand:
             "position": self.position,
             "value": self.value,
             "old_value": self.old_value,
+            "new_value": self.new_value,
             "relation": self.relation,
             "occurrence": self.occurrence,
             "raw": self.raw,
