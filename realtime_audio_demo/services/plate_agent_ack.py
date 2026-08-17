@@ -16,7 +16,9 @@ def ack_scene_for_state(state: PlateAgentState) -> str:
 
 
 def ack_schedule_for_state(state: PlateAgentState) -> list[tuple[float, str]]:
-    messages = ACK_MESSAGES_BY_SCENE[ack_scene_for_state(state)]
+    if state.has_car_plate:
+        return []
+    messages = ACK_MESSAGES_BY_SCENE["initial"]
     return list(zip(ACK_SCHEDULE_SECONDS, messages))
 
 
