@@ -398,7 +398,7 @@ export class RealtimeAudioClient extends EventTarget {
     if (this.state.mode !== "recording") return;
     this.setMode("finalizing");
     this.setStatus("停止录音，等待最终推理");
-    this.setVoiceState("模型输出中");
+    if (this.state.completedTurns === 0) this.setVoiceState("模型输出中");
     await this.flushInput();
     this.state._sendingAudio = false;
     if (this.state.ws && this.state.ws.readyState === WebSocket.OPEN) {
