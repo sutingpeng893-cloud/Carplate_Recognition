@@ -83,6 +83,7 @@ export class RealtimeAudioClient extends EventTarget {
       bargeInTriggered: false,
       preBufferChunks: null,
       preBufferSampleRate: null,
+      completedTurns: 0,
       // persistent mic — always on
       _persistentMic: null,
       _persistentMicSampleRate: null,
@@ -734,8 +735,10 @@ export class RealtimeAudioClient extends EventTarget {
         if (data.easy_turn_enabled) {
           this.emit("result", { text: "判断是否说完。", replace: true });
           this.setVoiceState("判断是否说完");
-        } else {
+        } else if (this.state.completedTurns === 0) {
           this.emit("result", { text: "正在推理。", replace: true });
+          this.setVoiceState("模型输出中");
+        } else {
           this.setVoiceState("模型输出中");
         }
         break;
@@ -814,6 +817,7 @@ export class RealtimeAudioClient extends EventTarget {
       this.setMode("idle");
     }
     this.log(`final latency=${data.latency_ms}ms, audio_chunks=${data.audio_chunks || this.state.streamedAudioCount}, input=${data.saved_input_wav}`);
+    this.state.completedTurns += 1;
     if (!this.state.streamSpeechAudio) this.closeSocket(socket);
   }
 
