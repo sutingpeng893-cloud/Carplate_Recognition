@@ -808,6 +808,8 @@ export class RealtimeAudioClient extends EventTarget {
       this.setVoiceState("播报完");
       this.log("没有解析到音频输出。");
     }
+    this.log(`final latency=${data.latency_ms}ms, audio_chunks=${data.audio_chunks || this.state.streamedAudioCount}, input=${data.saved_input_wav}`);
+    this.state.completedTurns += 1;
     if (this.state.streamSpeechAudio) {
       this.setVoiceState("等待播报");
     } else if (this.hasPendingPlayback()) {
@@ -816,8 +818,6 @@ export class RealtimeAudioClient extends EventTarget {
       if (this.options.shouldAutoStartOnVad()) this.clearPassiveBufferAndResetVad();
       this.setMode("idle");
     }
-    this.log(`final latency=${data.latency_ms}ms, audio_chunks=${data.audio_chunks || this.state.streamedAudioCount}, input=${data.saved_input_wav}`);
-    this.state.completedTurns += 1;
     if (!this.state.streamSpeechAudio) this.closeSocket(socket);
   }
 
